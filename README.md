@@ -1,8 +1,10 @@
 # pi-interactive-subagents
 
-Async subagents for [pi](https://github.com/badlogic/pi-mono), running in tmux panes. Spawn a sub-agent, keep working in the main session, and get the result steered back when it finishes. Fully non-blocking.
+Async subagents for [pi](https://github.com/badlogic/pi-mono), running in Psmux panes on Windows through its tmux-compatible CLI. Spawn a sub-agent, keep working in the main session, and get the result steered back when it finishes. Fully non-blocking.
 
-**tmux-only fork.** See [Acknowledgements](#acknowledgements) for the upstream project, which also supports cmux, zellij, and WezTerm.
+**Windows-focused Psmux + Git Bash fork.** It keeps the upstream tmux-based integration model while replacing the native tmux requirement with [Psmux](https://github.com/psmux/psmux) and using Git Bash for POSIX shell compatibility.
+
+See [Acknowledgements](#acknowledgements) for the fork lineage and upstream projects.
 
 ## How it works
 
@@ -178,16 +180,24 @@ Status display is configured via `config.json` in the extension directory (copy 
 ## Requirements
 
 - [pi](https://github.com/badlogic/pi-mono)
-- [tmux](https://github.com/tmux/tmux)
+- [Psmux](https://github.com/psmux/psmux)
+- [Git Bash](https://git-scm.com/downloads/win)
+
+Run Pi inside a Psmux session from Git Bash:
 
 ```bash
 tmux new -A -s pi 'pi'
 ```
 
+Psmux provides a `tmux`-compatible CLI on Windows, while Git Bash provides the POSIX shell environment (`sh`, `bash`, shell quoting, and `.sh` script execution) expected by the extension.
+
 ## Acknowledgements
 
-Forked from [HazAT/pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents), which originated the subagent architecture, the multi-multiplexer surface layer, and the status widget; its supervision features were inspired by [RepoPrompt](https://repoprompt.com/).
+Forked from [amosblomqvist/pi-interactive-subagents](https://github.com/amosblomqvist/pi-interactive-subagents).
 
+That project is itself based on [HazAT/pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents), which originated the subagent architecture, multi-multiplexer surface layer, and status widget; its supervision features were inspired by [RepoPrompt](https://repoprompt.com/).
+
+This fork adds native Windows support using [Psmux](https://github.com/psmux/psmux) as a tmux-compatible terminal multiplexer together with Git Bash for POSIX shell compatibility.
 ## License
 
 MIT
