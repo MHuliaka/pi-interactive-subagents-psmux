@@ -185,6 +185,11 @@ const SPAWNING_TOOLS = [
 /** Built-in tools pi provides natively — no extension needs to be loaded. */
 const BUILTIN_TOOLS = new Set(["read", "write", "edit", "bash", "grep", "find", "ls"]);
 
+/** Native Pi extensions must be explicitly restored after --no-extensions. */
+const BUILTIN_TOOL_EXTENSIONS = new Map<string, string>([
+  ["codemode", "builtin:codemode"],
+]);
+
 /** Resolve the global agent config directory, respecting PI_CODING_AGENT_DIR. */
 function getAgentConfigDir(): string {
   return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
@@ -201,7 +206,7 @@ const EXTRA_TOOL_EXTENSIONS = new Map<string, string>();
 
 /** Register (or re-register) a custom tool's backing extension file. */
 export function registerToolExtension(name: string, extensionPath: string): void {
-  if (BUILTIN_TOOLS.has(name)) {
+  if (BUILTIN_TOOLS.has(name) || BUILTIN_TOOL_EXTENSIONS.has(name)) {
     throw new Error(`Cannot register custom tool "${name}": shadows a built-in pi tool`);
   }
   if ((SPAWNING_TOOLS as readonly string[]).includes(name)) {
@@ -227,11 +232,14 @@ export function registerToolExtension(name: string, extensionPath: string): void
 /**
  * Map a custom (non-built-in) tool name to the pi-extension file that
  * registers it. Used to build the child's `--extension` whitelist after
- * `--no-extensions` disables global discovery. Returns undefined for built-in
- * tools and for unknown names (which simply won't be granted).
+ * `--no-extensions` disables global discovery. Returns a builtin: reference
+ * for Pi's built-in extensions, a file path for custom extensions, and undefined
+ * for native tools or unknown names.
  */
 function getToolExtensionPath(tool: string): string | undefined {
   if (BUILTIN_TOOLS.has(tool)) return undefined;
+  const builtinExtension = BUILTIN_TOOL_EXTENSIONS.get(tool);
+  if (builtinExtension) return builtinExtension;
   // The four spawning tools are registered by THIS extension.
   if ((SPAWNING_TOOLS as readonly string[]).includes(tool)) {
     return fileURLToPath(import.meta.url);
@@ -901,7 +909,8 @@ function applySandboxToParts(
     const extPaths = new Set<string>();
     for (const tool of loadout.toolAllowlist.split(",")) {
       const extPath = getToolExtensionPath(tool);
-      if (extPath && existsSync(extPath)) extPaths.add(extPath);
+      // builtin: references are resolved by Pi, not by the filesystem.
+      if (extPath && (extPath.startsWith("builtin:") || existsSync(extPath))) extPaths.add(extPath);
     }
     for (const extPath of extPaths) {
       parts.push("-e", shellEscape(extPath));

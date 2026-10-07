@@ -2021,6 +2021,7 @@ describe("subagent discovery", () => {
       writeFileSync(webSearchPath, "export default function () {}\n");
       assert.equal(testApi.getToolExtensionPath("read"), undefined);
       assert.equal(testApi.getToolExtensionPath("bash"), undefined);
+      assert.equal(testApi.getToolExtensionPath("codemode"), "builtin:codemode");
       assert.equal(testApi.getToolExtensionPath("web_search"), webSearchPath);
       assert.ok(testApi.getToolExtensionPath("safe_bash")?.endsWith(join("tools", "safe-bash.ts")));
       // Spawning tools are registered by this extension itself.
@@ -2095,6 +2096,35 @@ describe("subagent discovery", () => {
   it("buildSubagentToolAllowlist returns null without an explicit tool restriction", () => {
     assert.equal(testApi.buildSubagentToolAllowlist(undefined), null);
     assert.equal(testApi.buildSubagentToolAllowlist(""), null);
+  });
+
+  it("codemode cannot be shadowed by a custom tool extension", () => {
+    assert.throws(
+      () => subagentsModule.registerToolExtension("codemode", "custom-codemode.ts"),
+      /shadows a built-in pi tool/,
+    );
+  });
+
+  it("applySandboxToParts explicitly loads codemode only when allowed", () => {
+    withTempDir((d) => {
+      for (const requested of ["read,codemode", "read"]) {
+        const toolAllowlist = testApi.buildSubagentToolAllowlist(requested);
+        const loadout: SubagentLoadout = {
+          agent: "scout", toolAllowlist, model: null, thinking: null,
+          systemPromptMode: null, identity: null, spawnable: null,
+          autoExit: true, cwd: null, agentDir: null,
+        };
+        const parts: string[] = [];
+        testApi.applySandboxToParts(parts, loadout, { artifactDir: d, name: "scout" });
+        assert.ok(parts.includes("--no-extensions"));
+        assert.equal(parts[parts.indexOf("--tools") + 1], shellEscape(toolAllowlist));
+        assert.equal(parts.includes("'builtin:codemode'"), requested.includes("codemode"));
+        if (requested.includes("codemode")) {
+          assert.equal(parts[parts.indexOf("'builtin:codemode'") - 1], "-e");
+          assert.equal(parts.filter(part => part === "'builtin:codemode'").length, 1);
+        }
+      }
+    });
   });
 
   it("applySandboxToParts replays model, identity, and default-deny tool restriction", () => {

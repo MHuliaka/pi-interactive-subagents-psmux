@@ -290,6 +290,18 @@ Access is **whitelist-only**. Every sub-agent process is launched with `--no-ext
 
 Spawns must name a known agent at **every** depth. A top-level session may spawn anything discoverable; a sub-agent may only spawn the agents in its `subagent_agents` list (enforced via `PI_SUBAGENT_ALLOWED`). There is no agentless spawn route, so a child can never escalate to a full-toolset profile by omitting its agent.
 
+### Codemode in subagents
+
+On current Pi builds, `codemode` is a built-in **extension**, not a tool backed by a file in your agent directory. Enable it for a subagent by listing it in the agent's frontmatter:
+
+```yaml
+tools: read, grep, find, ls, codemode
+```
+
+The extension preserves that allowlist and explicitly loads `-e builtin:codemode` alongside `--no-extensions`. This applies to both new launches and resumes whose saved loadout includes `codemode`. Adding it to an agent file does not change an older session's saved tool allowlist; spawn a new subagent to pick up that change.
+
+Codemode scripts can call the other enabled tools; adding `codemode` alone does not enable every built-in tool or restore global extension discovery. It requires a Pi version that supports `builtin:codemode`; older versions such as the project's legacy development dependency do not provide it.
+
 Extensions can register additional tools for sub-agents at runtime via `registerToolExtension(name, path)` on the `__pi_interactive_subagents` process global.
 
 ## Role folders
