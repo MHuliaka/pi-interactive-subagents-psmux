@@ -1,16 +1,19 @@
 /**
- * Integration tests for the tmux surface layer.
+ * Integration tests for the Psmux surface layer.
  *
- * These tests exercise real tmux operations: creating panes,
+ * These tests exercise real Psmux operations: creating panes,
  * sending commands, reading screen output, and closing panes.
  * No LLM calls — fast and free.
  *
- * Run inside tmux:
- *   tmux new 'npm run test:integration'
+ * Run inside Psmux:
+ *   psmux new -A -s pi-tests
+ *   npm run test:integration
  */
-import { describe, it, before, after } from "node:test";
+import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   getAvailableBackends,
   createTestEnv,
@@ -38,16 +41,24 @@ const backends = getAvailableBackends();
 const FOCUS_TEST_SHELL_READY_DELAY_MS = Number(process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS ?? "2500");
 
 if (backends.length === 0) {
-  console.log("⚠️  tmux is not available — skipping tmux-surface integration tests");
-  console.log("   Run inside tmux to enable these tests.");
+  console.log("⚠️  Psmux is not available — skipping psmux-surface integration tests");
+  console.log("   Run inside Psmux to enable these tests.");
 }
 
 for (const backend of backends) {
-  describe(`tmux-surface [${backend}]`, { timeout: 60_000 }, () => {
+  describe(`psmux-surface [${backend}]`, { timeout: 60_000 }, () => {
     let env: TestEnv;
 
     before(() => {
       env = createTestEnv();
+    });
+
+    afterEach(() => {
+      // Keep each test independent and avoid exhausting the detached window's width.
+      for (const surface of env.surfaces) {
+        try { closeSurface(surface); } catch {}
+      }
+      env.surfaces = [];
     });
 
     after(() => {
@@ -180,9 +191,9 @@ for (const backend of backends) {
       await sleep(1000);
 
       const marker = uniqueId();
-      const filePath = `/tmp/pi-tmux-test-${marker}.txt`;
+      const filePath = join(tmpdir(), `pi-psmux-test-${marker}.txt`).replace(/\\/g, "/");
 
-      sendCommand(surface, `echo "FILE_${marker}" > ${filePath} && echo "WRITTEN_${marker}"`);
+      sendCommand(surface, `echo "FILE_${marker}" > '${filePath.replace(/'/g, "'\\''")}' && echo "WRITTEN_${marker}"`);
 
       await waitForScreen(surface, new RegExp(`WRITTEN_${marker}`), 10_000, 50);
       const content = await waitForFile(filePath, 10_000, new RegExp(`FILE_${marker}`));

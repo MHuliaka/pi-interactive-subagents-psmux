@@ -1,12 +1,12 @@
 # pi-interactive-subagents
 
-Async subagents for [pi](https://github.com/badlogic/pi-mono), running in tmux panes. Spawn a sub-agent, keep working in the main session, and get the result steered back when it finishes. Fully non-blocking.
+Async subagents for [pi](https://github.com/badlogic/pi-mono), running in native Windows [Psmux](https://github.com/psmux/psmux) panes. Spawn a sub-agent, keep working in the main session, and get the result steered back when it finishes. Fully non-blocking.
 
-**tmux-only fork.** See [Acknowledgements](#acknowledgements) for the upstream project, which also supports cmux, zellij, and WezTerm.
+**Psmux-only Windows fork.** See [Acknowledgements](#acknowledgements) for the upstream project, which also supports cmux, zellij, and WezTerm.
 
 ## How it works
 
-`subagent()` returns immediately. The sub-agent runs in its own tmux pane — a right split off the parent pi pane, so pane creation never steals keyboard focus. A live widget above the input tracks every running sub-agent, and when one finishes, its result is steered into the main session as a notification that triggers a new turn.
+`subagent()` returns immediately. The sub-agent runs in its own Psmux pane — a right split off the parent pi pane, so pane creation never steals keyboard focus. A live widget above the input tracks every running sub-agent, and when one finishes, its result is steered into the main session as a notification that triggers a new turn.
 
 ```
 ╭─ Subagents ──────────────────────────── 2 running ─╮
@@ -17,7 +17,7 @@ Async subagents for [pi](https://github.com/badlogic/pi-mono), running in tmux p
 
 Spawn several in parallel — they run concurrently and steer results back independently as each finishes.
 
-Panes are kept evenly sized: the extension re-applies an `even-horizontal` layout after every spawn and exit (debounced). The layout is a single constant, `SUBAGENT_TMUX_LAYOUT` in `pi-extension/subagents/tmux.ts` — change it to any named tmux layout (`main-vertical`, `tiled`, …).
+Panes are kept evenly sized: the extension re-applies an `even-horizontal` layout after every spawn and exit (debounced). The layout is a single constant, `SUBAGENT_PSMUX_LAYOUT` in `pi-extension/subagents/psmux.ts` — change it to any supported named layout (`main-vertical`, `tiled`, …).
 
 If your shell startup is slow and launch commands get dropped before the prompt is ready, raise the delay:
 
@@ -29,7 +29,7 @@ export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500   # default: 500
 
 | Tool | Description |
 | --- | --- |
-| `subagent` | Spawn a sub-agent in a dedicated tmux pane (async) |
+| `subagent` | Spawn a sub-agent in a dedicated Psmux pane (async) |
 | `subagent_message` | Message a sub-agent by name — steers it if running, resumes its session if finished |
 | `subagents_list` | List available agent definitions |
 | `ask_question` | *(sub-agent sessions only)* Ask the orchestrator a question and wait for the reply |
@@ -178,11 +178,35 @@ Status display is configured via `config.json` in the extension directory (copy 
 ## Requirements
 
 - [pi](https://github.com/badlogic/pi-mono)
-- [tmux](https://github.com/tmux/tmux)
+- Windows 10/11 with Windows Terminal (ConPTY)
+- [Psmux](https://github.com/psmux/psmux), available as `psmux.exe` on PATH
+- [Git for Windows](https://git-scm.com/downloads/win) (Git Bash is used by pi's Bash tool and the subagent launch scripts)
 
-```bash
-tmux new -A -s pi 'pi'
+Install from PowerShell, then open a new terminal so PATH is refreshed:
+
+```powershell
+winget install psmux
+winget install --id Git.Git -e
+psmux new -A -s pi
+# Inside the Psmux session:
+pi
 ```
+
+The parent pi session can run in PowerShell. The extension explicitly starts Git Bash
+in each subagent pane, so you do not need to change Psmux's default shell. It detects
+Psmux via `PSMUX_SESSION` and uses its tmux-compatible `TMUX_PANE` to target splits
+without stealing focus.
+
+For a custom Git installation, set `PI_BASH_PATH` to the full path of the native
+`bash.exe` before starting pi (for example `C:\Program Files\Git\bin\bash.exe`).
+Use Git Bash, not the legacy `C:\Windows\System32\bash.exe` WSL launcher.
+
+Run `npm test` for unit tests. To exercise actual panes without LLM calls, run
+`node --test test/integration/psmux-surface.test.ts` inside Psmux. The full
+`npm run test:integration` suite also makes paid LLM calls.
+
+Claude Code agents additionally need the Claude CLI and `python3` on PATH for the
+existing Bash stop hook.
 
 ## Acknowledgements
 

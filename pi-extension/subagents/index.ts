@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { keyHint } from "@mariozechner/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
 import { Box, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   readdirSync,
@@ -13,7 +13,7 @@ import {
   copyFileSync,
   unlinkSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import {
   isMuxAvailable,
   muxSetupHint,
@@ -24,7 +24,7 @@ import {
   closeSurface,
   shellEscape,
   readScreen,
-} from "./tmux.ts";
+} from "./psmux.ts";
 
 import {
   countSessionEntryLines,
@@ -272,6 +272,8 @@ function parseSessionMode(value: string | undefined): SubagentSessionMode | unde
 }
 
 function parseAgentDefinition(content: string, fallbackName: string): AgentDefinition | null {
+  // Git for Windows commonly checks out Markdown with CRLF line endings.
+  content = content.replace(/\r\n/g, "\n");
   const match = content.match(/^---\n([\s\S]*?)\n---/);
   if (!match) return null;
 
@@ -338,7 +340,7 @@ function resolveSubagentPaths(
   const cwdIsFromAgent = !params.cwd && agentDefs?.cwd != null;
   const cwdBase = cwdIsFromAgent ? getAgentConfigDir() : process.cwd();
   const effectiveCwd = rawCwd
-    ? rawCwd.startsWith("/")
+    ? isAbsolute(rawCwd)
       ? rawCwd
       : join(cwdBase, rawCwd)
     : null;
@@ -508,10 +510,10 @@ function muxUnavailableResult() {
     content: [
       {
         type: "text" as const,
-        text: `Subagents require tmux. ${muxSetupHint()}`,
+        text: `Subagents require Psmux. ${muxSetupHint()}`,
       },
     ],
-    details: { error: "tmux not available" },
+    details: { error: "Psmux not available" },
   };
 }
 
@@ -1008,7 +1010,7 @@ function steerSubagent(
   } catch (error: any) {
     return {
       error:
-        `Failed to deliver message to subagent "${running.name}" via tmux: ` +
+        `Failed to deliver message to subagent "${running.name}" via Psmux: ` +
         `${error?.message ?? String(error)}`,
     };
   }
@@ -1245,7 +1247,7 @@ async function launchSubagent(
     : `${roleBlock}\n\n${modeHint}\n\n${params.task}\n\n${summaryInstruction}`;
   // ── Claude Code CLI path ──
   if (agentDefs?.cli === "claude") {
-    const sentinelFile = `/tmp/pi-claude-${id}-done`;
+    const sentinelFile = join(tmpdir(), `pi-claude-${id}-done`).replace(/\\/g, "/");
     const pluginDir = join(SUBAGENTS_DIR, "plugin");
 
     const cmdParts: string[] = [];
@@ -1459,7 +1461,7 @@ async function launchSubagent(
  * and removes the entry from runningSubagents.
  */
 const CLAUDE_SESSIONS_DIR = join(
-  process.env.HOME ?? "/tmp",
+  homedir(),
   ".pi", "agent", "sessions", "claude-code",
 );
 

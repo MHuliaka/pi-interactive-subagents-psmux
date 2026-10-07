@@ -1,12 +1,12 @@
 /**
- * tmux surface layer — the only terminal multiplexer this extension supports.
+ * Psmux surface layer — native Windows terminal multiplexer support.
  *
  * Everything the extension does to a pane goes through the small API in this
  * file: create/split a pane, type a command into it, read its screen, close
- * it, and poll for exit. Keeping the tmux calls isolated here means index.ts
+ * it, and poll for exit. Keeping the Psmux calls isolated here means index.ts
  * stays testable without a multiplexer running.
  *
- * Panes are identified by tmux pane ids (e.g. `%12`). Splits always target
+ * Panes are identified by Psmux's tmux-compatible pane ids (e.g. `%12`). Splits always target
  * the parent pi's pane (`$TMUX_PANE`) so they follow the agent rather than
  * the user's focus.
  */
@@ -15,8 +15,6 @@ import { promisify } from "node:util";
 import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-
-const execFileAsync = promisify(execFile);
 
 // ── Availability ──
 
@@ -29,7 +27,8 @@ function hasCommand(command: string): boolean {
 
   let available = false;
   try {
-    execFileSync("sh", ["-c", `command -v ${command}`], { stdio: "ignore" });
+    // Probe the executable directly: Windows does not provide `sh`/`command -v`.
+    execFileSync(command, ["--version"], { stdio: "ignore", timeout: 5000 });
     available = true;
   } catch {
     available = false;
@@ -40,25 +39,51 @@ function hasCommand(command: string): boolean {
 }
 
 /**
- * True when running inside tmux with the tmux binary on PATH.
- * `TMUX` is set by tmux in every process it spawns (shell or pane).
+ * Psmux exports TMUX and TMUX_PANE for compatibility, plus PSMUX_SESSION.
+ * Do not accept a plain tmux session just because psmux is installed.
  */
-export function isTmuxAvailable(): boolean {
-  return !!process.env.TMUX && hasCommand("tmux");
+export function isPsmuxAvailable(): boolean {
+  return !!process.env.PSMUX_SESSION && !!process.env.TMUX_PANE && hasCommand("psmux");
 }
 
 export function isMuxAvailable(): boolean {
-  return isTmuxAvailable();
+  return isPsmuxAvailable();
 }
 
 export function muxSetupHint(): string {
-  return "Start pi inside tmux (`tmux new -A -s pi 'pi'`).";
+  return "Install Psmux and Git for Windows, then start pi inside Psmux (`psmux new -A -s pi`, then `pi`).";
 }
 
-function requireTmux(): void {
-  if (!isTmuxAvailable()) {
-    throw new Error(`tmux is required for subagents. ${muxSetupHint()}`);
+function requirePsmux(): void {
+  if (!isPsmuxAvailable()) {
+    throw new Error(`Psmux is required for subagents. ${muxSetupHint()}`);
   }
+}
+
+/** Resolve a native Git Bash, not the legacy Windows/WSL bash shim. */
+export function resolveBash(): string {
+  const override = process.env.PI_BASH_PATH;
+  if (override) {
+    if (!hasCommand(override)) throw new Error(`PI_BASH_PATH is not executable: ${override}`);
+    return override;
+  }
+  if (process.platform === "win32") {
+    const candidates = [
+      join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "bin", "bash.exe"),
+      join(process.env.LOCALAPPDATA ?? "", "Programs", "Git", "bin", "bash.exe"),
+    ];
+    for (const candidate of candidates) {
+      if (existsSync(candidate) && hasCommand(candidate)) return candidate;
+    }
+  }
+  if (hasCommand("bash")) return "bash";
+  throw new Error("Git Bash is required for subagent launch scripts. Install Git for Windows or set PI_BASH_PATH to bash.exe.");
+}
+
+/** Pass argv separately: a quoted command string is misparsed by Psmux 3.3.8. */
+export function bashPaneArgs(bashPath: string): string[] {
+  if (/["\r\n]/.test(bashPath)) throw new Error("Invalid Bash executable path");
+  return ["--", bashPath.replace(/\\/g, "/"), "--login", "-i"];
 }
 
 // ── Shell helpers ──
@@ -70,19 +95,19 @@ export function shellEscape(s: string): string {
 // ── Pane layout ──
 
 /**
- * tmux layout applied to the subagent window to keep panes evenly sized.
+ * Psmux layout applied to the subagent window to keep panes evenly sized.
  * Switchable: "even-horizontal" (equal columns, matches Ctrl+b Alt+1),
  * "main-vertical" (big main pane + tiled column), "tiled" (grid).
  */
-const SUBAGENT_TMUX_LAYOUT = "even-horizontal";
+const SUBAGENT_PSMUX_LAYOUT = "even-horizontal";
 
 let rebalanceTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
  * Re-balance subagent panes so repeated splits don't leave them lopsided.
- * tmux halves the target pane on every split and dumps freed space onto a
+ * Psmux halves the target pane on every split and dumps freed space onto a
  * neighbor on close, so without this panes drift to wildly uneven widths.
- * Applies SUBAGENT_TMUX_LAYOUT to the parent pi window. Debounced so a burst
+ * Applies SUBAGENT_PSMUX_LAYOUT to the parent pi window. Debounced so a burst
  * of parallel spawns or staggered exits collapses into a single layout call,
  * and non-fatal: a cosmetic resize must never break spawning or watching.
  */
@@ -95,7 +120,7 @@ function rebalanceSurfaces(hintPane?: string): void {
     rebalanceTimer = null;
     try {
       // -t <pane> resolves to that pane's window; does not change focus.
-      execFileSync("tmux", ["select-layout", "-t", target, SUBAGENT_TMUX_LAYOUT], {
+      execFileSync("psmux", ["select-layout", "-t", target, SUBAGENT_PSMUX_LAYOUT], {
         encoding: "utf8",
       });
     } catch {
@@ -114,7 +139,7 @@ function rebalanceSurfaces(hintPane?: string): void {
  * Returns the new pane id (e.g. `%12`).
  */
 export function createSurface(name: string): string {
-  void name; // tmux panes are not named; the pi process inside shows its own title.
+  void name; // Psmux panes are not named; the pi process inside shows its own title.
   return createSurfaceSplit(name, "right", process.env.TMUX_PANE);
 }
 
@@ -128,7 +153,9 @@ export function createSurfaceSplit(
   fromSurface?: string,
 ): string {
   void name;
-  requireTmux();
+  requirePsmux();
+  // Launch scripts and sendCommand use Bash syntax regardless of the parent's shell.
+  const bash = resolveBash();
 
   const args = ["split-window", "-d"];
   if (direction === "left" || direction === "right") {
@@ -142,11 +169,16 @@ export function createSurfaceSplit(
   if (fromSurface) {
     args.push("-t", fromSurface);
   }
-  args.push("-P", "-F", "#{pane_id}");
+  args.push("-P", "-F", "#{pane_id}", ...bashPaneArgs(bash));
 
-  const pane = execFileSync("tmux", args, { encoding: "utf8" }).trim();
-  if (!pane.startsWith("%")) {
-    throw new Error(`Unexpected tmux split-window output: ${pane}`);
+  const pane = execFileSync("psmux", args, { encoding: "utf8" }).trim();
+  if (!/^%\d+$/.test(pane)) {
+    throw new Error(`Unexpected Psmux split-window output: ${pane}`);
+  }
+  // Psmux 3.3.8 can report the existing pane when a split has no room.
+  // Never treat the parent as a child: doing so could send it commands or kill pi.
+  if (pane === process.env.TMUX_PANE || pane === fromSurface) {
+    throw new Error("Psmux did not create a new pane. Enlarge the window or close unused panes before spawning a subagent.");
   }
 
   rebalanceSurfaces(pane);
@@ -159,9 +191,9 @@ export function createSurfaceSplit(
  * then submitted with Enter.
  */
 export function sendCommand(surface: string, command: string): void {
-  requireTmux();
-  execFileSync("tmux", ["send-keys", "-t", surface, "-l", command], { encoding: "utf8" });
-  execFileSync("tmux", ["send-keys", "-t", surface, "Enter"], { encoding: "utf8" });
+  requirePsmux();
+  execFileSync("psmux", ["send-keys", "-t", surface, "-l", command], { encoding: "utf8" });
+  execFileSync("psmux", ["send-keys", "-t", surface, "Enter"], { encoding: "utf8" });
 }
 
 /**
@@ -198,7 +230,9 @@ export function sendLongCommand(
   writeFileSync(scriptPath, scriptParts.join("\n") + "\n", {
     mode: 0o755,
   });
-  sendCommand(surface, `bash ${shellEscape(scriptPath)}`);
+  // Git Bash accepts drive paths with forward slashes, including paths with spaces.
+  const bashScriptPath = process.platform === "win32" ? scriptPath.replace(/\\/g, "/") : scriptPath;
+  sendCommand(surface, `bash ${shellEscape(bashScriptPath)}`);
   return scriptPath;
 }
 
@@ -206,9 +240,9 @@ export function sendLongCommand(
  * Read the screen contents of a pane (sync).
  */
 export function readScreen(surface: string, lines = 50): string {
-  requireTmux();
+  requirePsmux();
   return execFileSync(
-    "tmux",
+    "psmux",
     ["capture-pane", "-p", "-t", surface, "-S", `-${Math.max(1, lines)}`],
     {
       encoding: "utf8",
@@ -220,9 +254,9 @@ export function readScreen(surface: string, lines = 50): string {
  * Read the screen contents of a pane (async).
  */
 export async function readScreenAsync(surface: string, lines = 50): Promise<string> {
-  requireTmux();
-  const { stdout } = await execFileAsync(
-    "tmux",
+  requirePsmux();
+  const { stdout } = await promisify(execFile)(
+    "psmux",
     ["capture-pane", "-p", "-t", surface, "-S", `-${Math.max(1, lines)}`],
     { encoding: "utf8" },
   );
@@ -233,8 +267,8 @@ export async function readScreenAsync(surface: string, lines = 50): Promise<stri
  * Close a pane.
  */
 export function closeSurface(surface: string): void {
-  requireTmux();
-  execFileSync("tmux", ["kill-pane", "-t", surface], { encoding: "utf8" });
+  requirePsmux();
+  execFileSync("psmux", ["kill-pane", "-t", surface], { encoding: "utf8" });
   rebalanceSurfaces();
 }
 

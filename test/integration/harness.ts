@@ -2,9 +2,9 @@
  * Integration test harness for pi-interactive-subagents.
  *
  * Provides utilities to:
- * - Detect whether tmux is available
+ * - Detect whether Psmux is available
  * - Create isolated test environments with test agent definitions
- * - Start real pi sessions in tmux panes
+ * - Start real pi sessions in Psmux panes
  * - Poll for file creation and screen output
  * - Clean up panes and temp files after tests
  */
@@ -32,9 +32,9 @@ import {
   readScreenAsync,
   closeSurface,
   shellEscape,
-} from "../../pi-extension/subagents/tmux.ts";
+} from "../../pi-extension/subagents/psmux.ts";
 
-// Re-export tmux primitives for tests
+// Re-export Psmux primitives for tests
 export {
   createSurface,
   createSurfaceSplit,
@@ -76,20 +76,20 @@ export const PI_TIMEOUT = Number(process.env.PI_TEST_TIMEOUT ?? "120000");
 // ── Backend detection ──
 
 /**
- * Detect whether tmux is available in the current environment.
- * Returns ["tmux"] or [].
+ * Detect whether Psmux is available in the current environment.
+ * Returns ["psmux"] or [].
  */
 export function getAvailableBackends(): string[] {
-  return isMuxAvailable() ? ["tmux"] : [];
+  return isMuxAvailable() ? ["psmux"] : [];
 }
 
 export function focusSurface(surface: string): void {
-  execFileSync("tmux", ["select-pane", "-t", surface], { encoding: "utf8" });
+  execFileSync("psmux", ["select-pane", "-t", surface], { encoding: "utf8" });
 }
 
 export function getFocusedSurface(): string | null {
   try {
-    const panes = execFileSync("tmux", ["list-panes", "-F", "#{pane_id} #{pane_active}"], {
+    const panes = execFileSync("psmux", ["list-panes", "-F", "#{pane_id} #{pane_active}"], {
       encoding: "utf8",
     });
     const activeLine = panes.split("\n").find((line) => line.endsWith(" 1"));
@@ -110,7 +110,7 @@ export async function waitForFocusedSurface(
   }
 
   throw new Error(
-    `Timeout (${timeout}ms) waiting for focused tmux pane ${surface}; ` +
+    `Timeout (${timeout}ms) waiting for focused Psmux pane ${surface}; ` +
       `current focus is ${getFocusedSurface() ?? "unknown"}`,
   );
 }
