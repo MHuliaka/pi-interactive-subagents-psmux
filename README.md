@@ -49,7 +49,7 @@ $realPi=(Get-Command pi).Source; $bin="$env:USERPROFILE\bin"; New-Item -ItemType
 if defined TMUX (
   call "$realPi" %*
 ) else (
-  psmux new -A -s pi '"$realPi" %*'
+  psmux new -s pi '"$realPi" %*'
 )
 "@ | Set-Content "$bin\pi.cmd" -Encoding ASCII; $p=[Environment]::GetEnvironmentVariable("Path","User"); if (($p -split ';') -notcontains $bin) { [Environment]::SetEnvironmentVariable("Path","$bin;$p","User") }; Write-Host "Created $bin\pi.cmd -> $realPi"
 ```
@@ -65,7 +65,7 @@ pi
 creates or attaches to a Psmux session named `pi`. When creating a new session, it effectively launches:
 
 ```text
-psmux new -A -s pi "REAL_PI"
+psmux new -s pi "REAL_PI"
 ```
 
 Arguments are forwarded too, for example:
