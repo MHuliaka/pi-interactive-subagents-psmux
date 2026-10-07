@@ -11,6 +11,7 @@ const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = join(root, "agent");
 const { default: extension, __test__: testApi } = await import("../pi-extension/subagents/index.ts");
 const { SUBAGENT_CONFIG_PATH, loadSubagentConfig, parseSubagentConfig, resolveLoadoutModel, writeModelSelection } = await import("../pi-extension/subagents/config.ts");
+const { ModelPickerComponent } = await import("../pi-extension/subagents/model-picker.ts");
 
 const parent = { provider: "vendor", id: "parent", reasoning: true };
 const cheaper = { provider: "vendor", id: "cheap", reasoning: false };
@@ -104,6 +105,60 @@ describe("model configuration integration", () => {
     assert.equal(renders, 2);
   });
 
+  it("the picker treats Ctrl+C and Esc as cancellation, including with no matches", () => {
+    for (const key of ["\x03", "\x1b[99;5u", "\x1b"]) {
+      const results: Array<string | undefined> = [];
+      const component = new ModelPickerComponent(theme, {
+        title: "model", items: [{ value: "a", label: "A", searchText: "A" }],
+      }, value => results.push(value));
+      component.handleInput("zzzz");
+      component.handleInput(key);
+      assert.deepEqual(results, [undefined]);
+    }
+  });
+
+  for (const cancelStep of [0, 1, 2]) {
+    it(`/subagent-model consumes Ctrl+C at step ${cancelStep + 1} without changing config`, async () => {
+      writeModelSelection({ agentName: null, model: "vendor/parent", thinking: "low" });
+      const before = readFileSync(SUBAGENT_CONFIG_PATH, "utf8");
+      const { commands, ctx } = setup();
+      ctx.mode = "tui";
+      let listener: ((data: string) => any) | undefined;
+      let unsubscribed = 0;
+      let step = 0;
+      ctx.ui.onTerminalInput = (handler: typeof listener) => {
+        listener = handler;
+        return () => { listener = undefined; unsubscribed++; };
+      };
+      ctx.ui.custom = (factory: any) => new Promise(resolve => {
+        const component = factory({ requestRender() {} }, theme, {}, resolve);
+        assert.ok(listener);
+        assert.equal(listener!("x"), undefined, "ordinary input must not be consumed");
+        if (step++ === cancelStep) {
+          assert.deepEqual(listener!("\x03"), { consume: true }, "Ctrl+C must not reach Pi's editor");
+        } else {
+          component.handleInput("\r");
+        }
+      });
+      await commands.get("subagent-model").handler("", ctx);
+      assert.equal(readFileSync(SUBAGENT_CONFIG_PATH, "utf8"), before);
+      assert.equal(unsubscribed, cancelStep + 1);
+      assert.equal(listener, undefined, "normal Ctrl+C behavior must be restored after closing");
+    });
+  }
+
+  it("removes the Ctrl+C listener if the custom UI rejects", async () => {
+    const { ctx } = setup();
+    let unsubscribed = false;
+    ctx.ui.onTerminalInput = () => () => { unsubscribed = true; };
+    ctx.ui.custom = async (factory: any) => {
+      factory({ requestRender() {} }, theme, {}, () => {});
+      throw new Error("UI failed");
+    };
+    await assert.rejects(testApi.pickModelChoice(ctx, "model", []), /UI failed/);
+    assert.equal(unsubscribed, true);
+  });
+
   it("/subagent-model persists a model and thinking through the non-TUI selector", async () => {
     const { commands, notices, ctx } = setup();
     ctx.mode = "rpc";
@@ -120,6 +175,7 @@ describe("model configuration integration", () => {
 
   it("/subagent-model cancels without creating config", async () => {
     const { commands, ctx } = setup();
+    ctx.mode = "rpc";
     ctx.ui.select = async () => undefined;
     await commands.get("subagent-model").handler("", ctx);
     assert.equal(existsSync(SUBAGENT_CONFIG_PATH), false);

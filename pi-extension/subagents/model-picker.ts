@@ -55,7 +55,7 @@ const UNSELECTED_CURSOR = "  ";
 const CURRENT_MARKER = "● ";
 const BLANK_MARKER = "  ";
 const NO_MATCH_TEXT = "  No matching models";
-const FOOTER_HINT = "↑↓ navigate · Enter select · Esc cancel";
+const FOOTER_HINT = "↑↓ navigate · Enter select · Esc / Ctrl+C cancel";
 
 /** Canonical `provider/id` reference for a registry model. */
 export function modelPickerItemId(model: ModelPickerModel): string {
@@ -200,7 +200,7 @@ export class ModelPickerComponent extends Container {
       if (selected) this.done(selected.value);
       return;
     }
-    if (keybindings.matches(data, "tui.select.cancel") || matchesKey(data, Key.escape)) {
+    if (keybindings.matches(data, "tui.select.cancel") || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
       this.done(undefined);
       return;
     }

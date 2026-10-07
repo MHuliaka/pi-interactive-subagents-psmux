@@ -6,6 +6,37 @@ Async subagents for [pi](https://github.com/badlogic/pi-mono), running in Psmux 
 
 See [Acknowledgements](#acknowledgements) for the fork lineage and upstream projects.
 
+## Windows quick start
+
+Install [pi](https://github.com/badlogic/pi-mono), Psmux, and Git for Windows. From PowerShell:
+
+```powershell
+winget install psmux
+winget install --id Git.Git -e
+```
+
+Open a new terminal so PATH picks up the installed executables, then start a Psmux session:
+
+```powershell
+psmux new -A -s pi
+```
+
+Inside that session, change to this checkout and load the extension:
+
+```powershell
+pi -e ./pi-extension/subagents/index.ts
+```
+
+The parent session can use PowerShell; the extension explicitly starts Git Bash in child panes. No WSL or native Unix tmux installation is needed.
+
+In pi, run `/subagent-model` to choose models for your agents, then try:
+
+```text
+/subagent scout Summarize this project's architecture
+```
+
+If pi was already running when the extension changed, use `/reload` first. See [Model configuration](#model-configuration) for persistent settings and precedence.
+
 ## How it works
 
 `subagent()` returns immediately. The sub-agent runs in its own Psmux pane — a right split off the parent pi pane, so pane creation never steals keyboard focus. A live widget above the input tracks every running sub-agent, and when one finishes, its result is steered into the main session as a notification that triggers a new turn.
@@ -23,8 +54,16 @@ Panes are kept evenly sized: the extension re-applies an `even-horizontal` layou
 
 If your shell startup is slow and launch commands get dropped before the prompt is ready, raise the delay:
 
+Set the delay before starting pi. From PowerShell:
+
+```powershell
+$env:PI_SUBAGENT_SHELL_READY_DELAY_MS = '2500' # default: 500 ms
+```
+
+Or from Git Bash:
+
 ```bash
-export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500   # default: 500
+export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500
 ```
 
 ## Tools
@@ -36,7 +75,12 @@ export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500   # default: 500
 | `subagents_list` | List available agent definitions |
 | `ask_question` | *(sub-agent sessions only)* Ask the orchestrator a question and wait for the reply |
 
-There is also a `/subagent <agent> <task>` command for spawning directly.
+### Commands
+
+| Command | Description |
+| --- | --- |
+| `/subagent <agent> <task>` | Spawn an agent directly |
+| `/subagent-model` | Choose a model and thinking level for one agent or the global default |
 
 ### Spawning
 
@@ -50,7 +94,7 @@ subagent({ agent: "worker", name: "dark-mode", task: "Implement the dark mode to
 | `agent` | string | required | Which agent to spawn (must be known and permitted) |
 | `task` | string | required | Task prompt |
 | `name` | string | agent name | Display name for the pane and widget. Must be unique — duplicates are auto-suffixed (`scout`, `scout-2`, …) |
-| `model` | string | agent's model | Override the model for this spawn |
+| `model` | string | resolved config/agent model | Override the model for this spawn unless the agent has an authoritative per-agent config pick (see [Model configuration](#model-configuration)) |
 | `cwd` | string | agent's `cwd` | Working directory (see [Role folders](#role-folders)) |
 
 ### Messaging
@@ -66,7 +110,7 @@ subagent_message({ name: "scout", message: "Also check the auth middleware" });
 
 Every spawn records name → session file in `artifacts/<sessionId>/subagent-registry.json`, so names stay addressable across pi restarts. A nested sub-agent that spawns children gets its own registry keyed by its own session id. Resume is refused with a clear error (listing known names) if the name isn't registered, the session file is gone, or the session predates sandboxed resume.
 
-**Resume replays the original sandbox.** At spawn time the fully-resolved loadout — tool allowlist, backing extensions, model, thinking level, system prompt, spawn whitelist, cwd — is snapshotted to `<session>.loadout.json`. Resume rebuilds the exact same restricted process from that snapshot rather than relaunching unrestricted.
+**Resume preserves the original sandbox.** At spawn time the fully-resolved loadout — tool allowlist, backing extensions, model token, thinking level, system prompt, spawn whitelist, cwd — is snapshotted to `<session>.loadout.json`. Resume restores the same tool and extension restrictions rather than relaunching unrestricted. Model and thinking selection are re-resolved against the current config, so changing `/subagent-model` also affects resumed agents; an `inherit` token follows the parent session's active model.
 
 ### ask_question
 
@@ -81,6 +125,8 @@ If the reply arrives while the sub-agent is still mid-turn, it is absorbed into 
 | **scout** | `openrouter/z-ai/glm-5.3` | `read`, `grep`, `find`, `ls` | Fast read-only codebase recon |
 | **researcher** | `openrouter/z-ai/glm-5.3` | `web_search`, `web_fetch`, `safe_bash` | Web research, synthesized into a sourced brief |
 | **worker** | `openrouter/z-ai/glm-5.3` | `read`, `write`, `edit`, `bash`, `web_search`, `web_fetch` + spawning | General implementer; may spawn `scout` and `researcher` |
+
+The models above are frontmatter defaults, not fixed requirements. Use `/subagent-model` to select models available in your pi installation without editing the bundled files.
 
 All three are autonomous (`auto-exit: true`) and carry their identity in the system prompt (`system-prompt: append`).
 
@@ -108,8 +154,8 @@ You are a specialized agent that does X...
 | ----- | ---- | ----------- |
 | `name` | string | Agent name (used in `agent: "my-agent"`) |
 | `description` | string | Shown in `subagents_list` |
-| `model` | string | Default model |
-| `thinking` | string | `minimal`, `low`, `medium`, or `high` |
+| `model` | string | Default model; config and spawn parameters can take precedence |
+| `thinking` | string | Default thinking level; supported levels depend on the model and pi version (see [Model configuration](#model-configuration)) |
 | `tools` | string | Strict tool allowlist. Built-ins: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`. Extension-backed: `web_search`, `web_fetch`, `safe_bash`, `video_extract`, `youtube_search`, `google_image_search`. Only the extensions backing the listed tools are loaded into the child |
 | `subagent_agents` | string | Comma-separated agent names this agent may spawn. **Presence of this field grants the spawning toolset** (`subagent`, `subagent_message`, `subagents_list`) and restricts spawn targets to the list. Omit it and the agent cannot spawn at all |
 | `skills` | string | Comma-separated skill names to auto-load |
@@ -167,9 +213,27 @@ Set a per-agent default with `cwd:` in frontmatter.
 
 ## Model configuration
 
+### Select models interactively
+
+Run `/subagent-model` inside pi:
+
+1. Choose an agent (`scout`, `researcher`, `worker`, or a custom agent), or **all agents (config default)**.
+2. Choose an available model, **inherit** to follow the parent session, or **reset to the agent's own model** to remove the selected target's model override.
+3. Choose a supported thinking level, leave it unchanged, or reset its override.
+
+Use the arrow keys and Enter to select, type to fuzzy-filter the model list, or press Esc or Ctrl+C to cancel the dialog without exiting pi. Cancellation at the agent, model, or thinking step leaves the saved config unchanged. Model and thinking choices are saved together only after both steps complete.
+
+A reset removes an override; it does not bypass the precedence chain below. For example, clearing an agent's model pick still allows `models.default` to apply. A global default does not replace existing per-agent picks.
+
+The command changes future launches and resumed sessions, not agents that are already running. `subagents_list` reports the resolved model and its source.
+
+### Config file and precedence
+
 A sub-agent model comes from the per-agent `models` entry, the spawn `model` parameter, the `models` default, or the agent frontmatter, in that order. The `models` section is optional. Without it, models come from the agent frontmatter exactly as before. A per-agent entry is authoritative: the parent's `model` parameter cannot silently override the user's `/subagent-model` pick and instead produces a warning.
 
-The config lives at `<agent-dir>/subagents.json` (default `~/.pi/agent/subagents.json`), outside the package checkout, so a package update cannot delete it. A legacy package-root `config.json` is still read as a fallback until the next write migrates it.
+The config lives at `<agent-dir>/subagents.json`, outside the package checkout, so a package update cannot delete it. On Windows the default is `%USERPROFILE%\.pi\agent\subagents.json`; `PI_CODING_AGENT_DIR` changes the agent directory. The file is created on the first saved selection and can also be edited manually.
+
+Read precedence is the durable `subagents.json`, then a legacy package-root `config.json`, then the shipped `config.json.example`. An effective write migrates legacy settings to the durable location and preserves the status section and unrelated config keys.
 
 ```json
 {
@@ -205,13 +269,15 @@ Resolution order, first match wins:
 | 4 | The `model:` field in the agent frontmatter. |
 | 5 | The pi session default, when no model applies. |
 
-A value is a `provider/modelId` string, a bare `modelId`, or `inherit`. `inherit` runs the sub-agent on the parent session's active model and thinking level. On resume the current config wins over the model stored in the loadout snapshot, so a `/subagent-model` change applies to sub-agents that already exist; the snapshot is only used when the config has no entry for the agent.
+A value is a `provider/modelId` string, a bare `modelId`, or `inherit`. A recognized thinking suffix such as `provider/modelId:low` is also supported. `inherit` uses the parent session's active model; thinking comes from the per-agent config, global config, or agent frontmatter, falling back to the parent's level when no explicit level is set.
+
+On resume, the current per-agent model pick wins, then the global default, then the token stored in the loadout snapshot. An `inherit` snapshot is resolved against the parent at resume time rather than freezing its original model.
 
 A model that this installation cannot run follows `fallback`. With the default `inherit` the sub-agent still starts and the parent shows a warning. Set `fallback` to `fail` to refuse the spawn instead. Set `validate` to `false` to pass every model through unchanged.
 
-Use `/subagent-model` to pick a model for one agent or for all agents. The picker scrolls with the selected row kept in view, supports fuzzy filtering, and marks the model currently configured for the target. It lists the session's `/scoped-models` set when one is configured, otherwise the credentialed catalogue. The command writes `<agent-dir>/subagents.json` and keeps the `status` section. `subagents_list` shows the model each agent will use and where it came from.
+Use `/subagent-model` to pick a model for one agent or for all agents. The picker scrolls with the selected row kept in view, supports fuzzy filtering, and marks the model currently configured for the target. On pi builds that expose scoped models, it lists that set when configured; otherwise it lists the credentialed catalogue. The command writes `<agent-dir>/subagents.json` and keeps the `status` section. `subagents_list` shows the model each agent will use and where it came from.
 
-After the model, `/subagent-model` asks for the thinking level. It offers `leave thinking unchanged` (keep the configured value), `reset to inherited/default` (remove the override so the global or frontmatter level applies), and the levels the chosen model supports. Only the chosen model's supported levels are listed: a model that cannot reason offers only `off`, with a note in the dialog, and `inherit` offers the parent session's model's levels. The row for the target's current effective level is pre-selected, and model and thinking are written in one update.
+After the model, `/subagent-model` asks for the thinking level. It offers `leave thinking unchanged` (keep the configured value), `reset to inherited/default` (remove the override so the global or frontmatter level applies), and the levels the chosen model supports. Only the chosen model's supported levels are listed: a model that cannot reason offers only `off`, with a note in the dialog, and `inherit` offers the parent session's model's levels. The target's configured thinking level (or the global configured level) is pre-selected when present in the list, and model and thinking are written in one update.
 
 The config accepts any level for any model, because the model can change later. When a configured level is not supported by the model that actually runs, the effective level is clamped to the nearest supported level and the parent shows a warning; a non-reasoning model resolves to `off`.
 
@@ -228,19 +294,51 @@ Status display and model selection share `<agent-dir>/subagents.json` (default `
 }
 ```
 
-## Requirements
+## Requirements & troubleshooting
 
-- [pi](https://github.com/badlogic/pi-mono)
-- [Psmux](https://github.com/psmux/psmux)
-- [Git Bash](https://git-scm.com/downloads/win)
+- Windows 10/11 with a ConPTY-capable terminal, such as Windows Terminal
+- [pi](https://github.com/badlogic/pi-mono), installed and configured with model credentials
+- [Psmux](https://github.com/psmux/psmux), available as `psmux.exe` on PATH
+- [Git for Windows](https://git-scm.com/downloads/win), providing native Git Bash
 
-Run Pi inside a Psmux session from Git Bash:
+This is a **Psmux + Git Bash** implementation, not a native PowerShell rewrite of the child launch scripts. The parent can run in PowerShell; child panes use Bash quoting, environment assignments, and `.sh` scripts. Claude Code agents also need the Claude CLI and `python3` on PATH for the existing Bash completion hook.
 
-```bash
-tmux new -A -s pi 'pi'
+### Custom Git installation
+
+Set the native Bash executable before starting pi:
+
+```powershell
+$env:PI_BASH_PATH = 'C:\Program Files\Git\bin\bash.exe'
 ```
 
-Psmux provides a `tmux`-compatible CLI on Windows, while Git Bash provides the POSIX shell environment (`sh`, `bash`, shell quoting, and `.sh` script execution) expected by the extension.
+Use Git Bash, not the legacy `C:\Windows\System32\bash.exe` WSL launcher.
+
+### Common issues
+
+- **`psmux` is not found:** open a new terminal after installation and check `where.exe psmux` and `psmux --version`.
+- **Subagents require Psmux:** start pi inside `psmux new -A -s pi`. Detection uses `PSMUX_SESSION` and the tmux-compatible `TMUX_PANE` environment variable.
+- **Launch input is dropped:** increase `PI_SUBAGENT_SHELL_READY_DELAY_MS` before starting pi (see [How it works](#how-it-works)).
+- **There is no room for a pane:** enlarge the terminal or close unused panes. The extension rejects a split that reports the existing parent pane rather than treating it as a child.
+- **A configured model is unavailable:** use `/subagent-model` to choose a credentialed model, or adjust `models.fallback`. Restricted agents load only their tool-backing extensions; a model backed by a custom provider extension may require additional integration.
+
+## Development & tests
+
+From the checkout, run:
+
+```powershell
+npm ci
+npm test
+```
+
+Unit tests cover model configuration, picker behavior, persistence, sandbox/resume resolution, and mocked Psmux operations without making LLM calls.
+
+To test actual panes, run this inside a Psmux session:
+
+```powershell
+node --test test/integration/psmux-surface.test.ts
+```
+
+The full `npm run test:integration` suite also runs subagent lifecycle tests with **real, paid LLM calls**. Integration suites do not exercise panes when run outside Psmux.
 
 ## Acknowledgements
 
@@ -249,6 +347,9 @@ Forked from [amosblomqvist/pi-interactive-subagents](https://github.com/amosblom
 That project is itself based on [HazAT/pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents), which originated the subagent architecture, multi-multiplexer surface layer, and status widget; its supervision features were inspired by [RepoPrompt](https://repoprompt.com/).
 
 This fork adds native Windows support using [Psmux](https://github.com/psmux/psmux) as a tmux-compatible terminal multiplexer together with Git Bash for POSIX shell compatibility.
+
+Model selection configuration and the picker were ported from [PR #14](https://github.com/amosblomqvist/pi-interactive-subagents/pull/14) by [T-NhanNguyen](https://github.com/T-NhanNguyen), with compatibility adaptations for this fork.
+
 ## License
 
 MIT

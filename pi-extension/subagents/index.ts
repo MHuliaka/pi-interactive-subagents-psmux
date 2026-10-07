@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { keyHint } from "@mariozechner/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
-import { Box, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { Box, Key, matchesKey, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -1339,15 +1339,28 @@ async function pickModelChoice(
     return items.find((item) => item.label === chosenLabel)?.value;
   }
 
-  return ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
-    const component = new ModelPickerComponent(theme, { title, items }, done);
-    const handleInput = component.handleInput.bind(component);
-    component.handleInput = (data: string) => {
-      handleInput(data);
-      tui.requestRender();
-    };
-    return component;
-  });
+  let unsubscribe: (() => void) | undefined;
+  try {
+    return await ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
+      const component = new ModelPickerComponent(theme, { title, items }, done);
+      // Consume Ctrl+C before it can reach Pi's interrupt/exit handlers, even
+      // when closing the dialog restores focus to the main editor immediately.
+      unsubscribe = ctx.ui.onTerminalInput?.((data) => {
+        if (matchesKey(data, Key.ctrl("c"))) {
+          done(undefined);
+          return { consume: true };
+        }
+      });
+      const handleInput = component.handleInput.bind(component);
+      component.handleInput = (data: string) => {
+        handleInput(data);
+        tui.requestRender();
+      };
+      return component;
+    });
+  } finally {
+    unsubscribe?.();
+  }
 }
 
 /** Separator between a model id and its source in the `subagents_list` tag. */
@@ -2606,7 +2619,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         .map((agent) => agent.name)
         .sort();
 
-      const target = await ctx.ui.select("Set the sub-agent model for:", [allLabel, ...agentNames]);
+      const target = await pickModelChoice(ctx, "Set the sub-agent model for", [allLabel, ...agentNames].map((name) => ({
+        value: name,
+        label: name,
+        searchText: name,
+      })));
       if (!target) return;
 
       const agentName = target === allLabel ? null : target;
