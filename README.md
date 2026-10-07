@@ -39,62 +39,92 @@ If pi was already running when the extension changed, use `/reload` first. See [
 
 ### Optional: make `pi` automatically start inside Psmux
 
-Run the following **once in PowerShell**, after installing pi and Psmux. It finds your current real pi launcher, creates a wrapper at `%USERPROFILE%\bin\pi.cmd`, and prepends that folder to your user PATH.
+Create a small Windows wrapper so that running:
 
-Before running it, check `(Get-Command pi).Source`. The launcher must be a `.cmd`, `.bat`, or `.exe` that CMD can execute. If PowerShell resolves `pi.ps1`, replace `(Get-Command pi).Source` in the snippet with `(Get-Command pi.cmd).Source`. Do not rerun it after the wrapper is already first on PATH: that would capture the wrapper itself and cause recursion.
+```text
+pi
+```
+
+from a normal terminal automatically starts Pi inside a **new independent Psmux session**.
+
+Run this once in PowerShell:
 
 ```powershell
-$realPi=(Get-Command pi).Source; $bin="$env:USERPROFILE\bin"; New-Item -ItemType Directory -Force $bin | Out-Null; @"
+$realPi=(Get-Command pi.cmd).Source
+$bin="$env:USERPROFILE\bin"
+
+New-Item -ItemType Directory -Force $bin | Out-Null
+
+@"
 @echo off
 if defined TMUX (
   call "$realPi" %*
 ) else (
-  psmux new -s pi '"$realPi" %*'
+  setlocal EnableDelayedExpansion
+  set "PI_MUX_SESSION=pi-!RANDOM!-!RANDOM!"
+  psmux new -s "!PI_MUX_SESSION!" '"$realPi" %*'
 )
-"@ | Set-Content "$bin\pi.cmd" -Encoding ASCII; $p=[Environment]::GetEnvironmentVariable("Path","User"); if (($p -split ';') -notcontains $bin) { [Environment]::SetEnvironmentVariable("Path","$bin;$p","User") }; Write-Host "Created $bin\pi.cmd -> $realPi"
+"@ | Set-Content "$bin\pi.cmd" -Encoding ASCII
+
+$p=[Environment]::GetEnvironmentVariable("Path","User")
+
+if (($p -split ';') -notcontains $bin) {
+  [Environment]::SetEnvironmentVariable(
+    "Path",
+    "$bin;$p",
+    "User"
+  )
+}
+
+Write-Host "Created $bin\pi.cmd -> $realPi"
 ```
 
-Then close and reopen CMD/Windows Terminal so the new PATH takes effect.
+Close and reopen your terminal so the updated `PATH` takes effect.
 
-After that, running:
+After that:
 
-```cmd
+```text
 pi
 ```
 
-creates or attaches to a Psmux session named `pi`. When creating a new session, it effectively launches:
+creates a new Psmux session with a unique name:
 
 ```text
-psmux new -s pi "REAL_PI"
+Terminal 1
+└─ Psmux session pi-12345-18422
+   └─ Pi
+
+Terminal 2
+└─ Psmux session pi-7312-29001
+   └─ Pi
 ```
 
-Arguments are forwarded too, for example:
+This allows multiple independent Pi sessions to run in parallel.
 
-```cmd
+Arguments are forwarded normally:
+
+```text
 pi --model openai-codex/gpt-6.1-sol
 ```
 
-Replace the example model with one available in your installation. Because `-A` attaches to an existing session, arguments launch a new Pi process only when the session is being created; they do not change a Pi process already running in that session.
+If `pi` is called from inside an existing Psmux session, the wrapper detects the `TMUX` environment variable and launches the real Pi directly instead of creating a nested Psmux session.
 
-If pi is already inside Psmux, the wrapper detects `TMUX` and runs the real pi directly instead of trying to create a nested Psmux session:
+You can list active sessions with:
 
 ```text
-CMD
- └─ pi ...
-     ↓
-   Psmux session "pi"
-     └─ real Pi ...
-
-inside Psmux
- └─ pi ...
-     ↓
-   real Pi directly
+psmux ls
 ```
 
-After reopening the terminal, verify which launcher wins from **CMD**:
+or:
 
-```cmd
-where pi
+```text
+tmux ls
+```
+
+To verify that the wrapper is being used:
+
+```powershell
+where.exe pi
 ```
 
 The first result should be:
