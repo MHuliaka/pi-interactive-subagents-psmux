@@ -37,6 +37,74 @@ In pi, run `/subagent-model` to choose models for your agents, then try:
 
 If pi was already running when the extension changed, use `/reload` first. See [Model configuration](#model-configuration) for persistent settings and precedence.
 
+### Optional: make `pi` automatically start inside Psmux
+
+Run the following **once in PowerShell**, after installing pi and Psmux. It finds your current real pi launcher, creates a wrapper at `%USERPROFILE%\bin\pi.cmd`, and prepends that folder to your user PATH.
+
+Before running it, check `(Get-Command pi).Source`. The launcher must be a `.cmd`, `.bat`, or `.exe` that CMD can execute. If PowerShell resolves `pi.ps1`, replace `(Get-Command pi).Source` in the snippet with `(Get-Command pi.cmd).Source`. Do not rerun it after the wrapper is already first on PATH: that would capture the wrapper itself and cause recursion.
+
+```powershell
+$realPi=(Get-Command pi).Source; $bin="$env:USERPROFILE\bin"; New-Item -ItemType Directory -Force $bin | Out-Null; @"
+@echo off
+if defined TMUX (
+  call "$realPi" %*
+) else (
+  psmux new -A -s pi '"$realPi" %*'
+)
+"@ | Set-Content "$bin\pi.cmd" -Encoding ASCII; $p=[Environment]::GetEnvironmentVariable("Path","User"); if (($p -split ';') -notcontains $bin) { [Environment]::SetEnvironmentVariable("Path","$bin;$p","User") }; Write-Host "Created $bin\pi.cmd -> $realPi"
+```
+
+Then close and reopen CMD/Windows Terminal so the new PATH takes effect.
+
+After that, running:
+
+```cmd
+pi
+```
+
+creates or attaches to a Psmux session named `pi`. When creating a new session, it effectively launches:
+
+```text
+psmux new -A -s pi "REAL_PI"
+```
+
+Arguments are forwarded too, for example:
+
+```cmd
+pi --model openai-codex/gpt-6.1-sol
+```
+
+Replace the example model with one available in your installation. Because `-A` attaches to an existing session, arguments launch a new Pi process only when the session is being created; they do not change a Pi process already running in that session.
+
+If pi is already inside Psmux, the wrapper detects `TMUX` and runs the real pi directly instead of trying to create a nested Psmux session:
+
+```text
+CMD
+ └─ pi ...
+     ↓
+   Psmux session "pi"
+     └─ real Pi ...
+
+inside Psmux
+ └─ pi ...
+     ↓
+   real Pi directly
+```
+
+After reopening the terminal, verify which launcher wins from **CMD**:
+
+```cmd
+where pi
+```
+
+The first result should be:
+
+```text
+C:\Users\<you>\bin\pi.cmd
+```
+
+In PowerShell, use `where.exe pi` instead (`where` is a PowerShell alias), and check `(Get-Command pi).Source` as well. If another launcher appears first, check your effective PATH order and any aliases or functions named `pi` before relying on the wrapper.
+
 ## How it works
 
 `subagent()` returns immediately. The sub-agent runs in its own Psmux pane — a right split off the parent pi pane, so pane creation never steals keyboard focus. A live widget above the input tracks every running sub-agent, and when one finishes, its result is steered into the main session as a notification that triggers a new turn.
