@@ -3,8 +3,8 @@ name: worker
 description: General-purpose worker — reads, writes, and edits code
 tools: read, write, edit, bash, web_search, web_fetch, codemode
 subagent_agents: scout, researcher
-model: openai-codex/gpt-6.1-sol
-thinking: medium
+model: openai/gpt-6-luna
+thinking: xhigh
 system-prompt: append
 auto-exit: true
 ---

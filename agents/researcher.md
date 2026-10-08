@@ -2,8 +2,8 @@
 name: researcher
 description: Web researcher — searches the web and synthesizes findings
 tools: web_search, web_fetch, safe_bash, codemode
-model: openai-codex/gpt-6.1-luna
-thinking: high
+model: openai/gpt-6-luna
+thinking: medium
 system-prompt: append
 auto-exit: true
 ---
