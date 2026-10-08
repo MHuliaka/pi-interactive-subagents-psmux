@@ -7,7 +7,7 @@ import {
   matchesKey,
   Spacer,
   Text,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 
 /** Structural view of the pi theme, so this module does not import a mode-internal type. */
 export interface ModelPickerTheme {

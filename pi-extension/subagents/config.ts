@@ -1,22 +1,19 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getAgentDir } from "@mariozechner/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 /**
  * Subagent config file (`subagents.json` in the pi agent directory).
  *
- * The file holds two independent sections:
- *   - `status` — status-line rendering (parsed by status.ts);
- *   - `models` — optional model selection for sub-agents (parsed here).
+ * The `models` section controls optional model selection for subagents.
+ * Other keys (including legacy `status`) are preserved on write but not used.
  *
  * The `models` section is opt-in. When the key is absent, sub-agent models come
  * from the agent frontmatter exactly as before, so existing installations are
  * unaffected.
  *
- * This module also owns the shared config-file primitives — the validation
- * guard, the raw JSON reader, and the file paths — so status.ts and the models
- * parser cannot drift apart.
+ * This module owns configuration validation, JSON reading, and durable paths.
  *
  * The file lives in the agent directory (default `~/.pi/agent`) rather than the
  * package checkout: the checkout is git-managed and `git clean -fdx` runs on a
@@ -201,16 +198,16 @@ export function createSubagentConfigGuard(
     invalid,
     isPlainObject,
     requireObject(value, fieldName) {
-      if (!isPlainObject(value)) invalid(`${fieldName} must be an object`);
+      if (!isPlainObject(value)) return invalid(`${fieldName} must be an object`);
       return value;
     },
     requireBoolean(value, fieldName) {
-      if (typeof value !== "boolean") invalid(`${fieldName} must be a boolean`);
+      if (typeof value !== "boolean") return invalid(`${fieldName} must be a boolean`);
       return value;
     },
     requireNonEmptyString(value, fieldName) {
       if (typeof value !== "string" || value.trim().length === 0) {
-        invalid(`${fieldName} must be a non-empty string`);
+        return invalid(`${fieldName} must be a non-empty string`);
       }
       return value.trim();
     },
@@ -322,7 +319,7 @@ export function parseSubagentConfig(rawConfig: unknown, source = DEFAULT_CONFIG_
   }
   if (models.fallback !== undefined) {
     if (models.fallback !== "default" && models.fallback !== "inherit" && models.fallback !== "fail") {
-      guard.invalid("models.fallback must be one of: default, inherit, fail");
+      return guard.invalid("models.fallback must be one of: default, inherit, fail");
     }
     parsed.fallback = models.fallback;
   }
@@ -682,6 +679,7 @@ export function resolveLoadoutModel(input: {
   return resolveModelToken({
     ...input,
     token: configuredToken ?? input.loadout.model,
+    agentName: input.loadout.agent,
     source,
     thinking,
   });

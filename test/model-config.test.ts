@@ -194,7 +194,7 @@ describe("model configuration integration", () => {
     assert.equal(saved.models?.default, "inherit");
   });
 
-  it("passes the resolved model to the Bash launch command without leaking inherit", () => {
+  it("passes raw RPC launch arguments without shell quoting or leaking inherit", () => {
     const loadout = {
       agent: "scout", model: "inherit", thinking: "medium", toolAllowlist: null,
       systemPromptMode: null, identity: null, spawnable: null, autoExit: false,
@@ -206,10 +206,10 @@ describe("model configuration integration", () => {
     testApi.applySandboxToParts(parts, loadout, {
       artifactDir: root, name: "scout", model: resolved.command, thinking: resolved.thinking,
     });
-    assert.deepEqual(parts, ["pi", "--model", "'vendor/parent:medium'"]);
+    assert.deepEqual(parts, ["pi", "--model", "vendor/parent", "--thinking", "medium"]);
     const snapshotOnly = ["pi"];
     testApi.applySandboxToParts(snapshotOnly, loadout, { artifactDir: root, name: "scout" });
-    assert.deepEqual(snapshotOnly, ["pi"], "the inherit token must never become a model CLI argument");
+    assert.deepEqual(snapshotOnly, ["pi", "--thinking", "medium"], "the inherit token must never become a model CLI argument");
   });
 
   it("subagents_list reports the resolved model and its config source", async () => {
