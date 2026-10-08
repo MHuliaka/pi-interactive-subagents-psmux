@@ -15,6 +15,7 @@ import { Subagent } from "./runtime.ts";
 import { SubagentScreen, SubagentWidget } from "./view.ts";
 import { buildTaskWithSkills } from "./prompts.ts";
 import { ChildDialog } from "./dialog.ts";
+import { SUBAGENT_SHORTCUT } from "./shortcuts.ts";
 
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 const SPAWNING_TOOLS = ["subagent", "subagent_message", "subagents_list"];
@@ -120,7 +121,7 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
         dismiss = () => screen?.close();
         // Consume exit/navigation keys before Pi's parent interrupt/exit handling.
         removeViewInput = context.ui.onTerminalInput((data) => {
-          if (["escape", "ctrl+c", "ctrl+d", "ctrl+shift+g"].some((key) => matchesKey(data, key as any))) {
+          if (["escape", "ctrl+c", "ctrl+d", SUBAGENT_SHORTCUT].some((key) => matchesKey(data, key as any))) {
             screen?.handleInput(data);
             return { consume: true };
           }
@@ -351,7 +352,7 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
     if (name.trim() && !agents.has(name.trim())) { context.ui.notify(`Unknown subagent: ${name.trim()}`, "warning"); return; }
     await openView(agents.get(name.trim()));
   } });
-  pi.registerShortcut(Key.ctrlShift("g"), { description: "Open subagent conversations", handler: async (context) => { ctx = context; await openView(); } });
+  pi.registerShortcut(SUBAGENT_SHORTCUT, { description: "Open subagent conversations", handler: async (context) => { ctx = context; await openView(); } });
   pi.registerCommand("subagent", { description: "Launch a profile: /subagent <agent> <task>", handler: async (args, context) => {
     const [agent, ...rest] = args.trim().split(/\s+/);
     if (!agent) { context.ui.notify("Usage: /subagent <agent> <task>", "warning"); return; }

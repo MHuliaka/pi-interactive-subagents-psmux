@@ -1,6 +1,7 @@
 import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { Editor, Markdown, Text, matchesKey, truncateToWidth, visibleWidth, type Component, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { Subagent, type ToolActivity } from "./runtime.ts";
+import { SUBAGENT_SHORTCUT, SUBAGENT_SHORTCUT_HINT } from "./shortcuts.ts";
 
 const BLUE = "\x1b[38;2;77;163;255m";
 const RESET = "\x1b[0m";
@@ -28,7 +29,7 @@ export class SubagentWidget implements Component {
     this.shown = agents.slice(-5);
     const count = agents.filter((a) => a.live).length;
     const rows = this.shown.map((a) => truncateToWidth(` › ${clean(a.name)} (${clean(a.agent)}) · ${a.phase} · ${clean(a.activity)} · ${a.rpc ? `${a.elapsed}s` : "saved"}`, Math.max(0, width - 2)));
-    rows.push(` /subagents · Ctrl+Shift+G · ${agents.length} total${agents.length > 5 ? " (last 5 shown)" : ""}`);
+    rows.push(` /subagents · ${SUBAGENT_SHORTCUT_HINT} · ${agents.length} total${agents.length > 5 ? " (last 5 shown)" : ""}`);
     return blueBox(`Subagents · ${count} running`, rows, width);
   }
   handleMouse(event: TuiMouseEvent) {
@@ -98,7 +99,7 @@ export class SubagentScreen implements Component {
 
   handleInput(data: string) {
     if (this.closed) return;
-    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+shift+g")) this.close();
+    if (matchesKey(data, "escape") || matchesKey(data, SUBAGENT_SHORTCUT)) this.close();
     else if (matchesKey(data, "ctrl+c") || matchesKey(data, "ctrl+d")) { void this.agent.stop(); this.close(); }
     else if (matchesKey(data, "pageUp")) this.scrollBy(-this.viewportHeight);
     else if (matchesKey(data, "pageDown")) this.scrollBy(this.viewportHeight);

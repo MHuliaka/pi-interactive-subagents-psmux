@@ -56,6 +56,13 @@ describe("in-tab view", () => {
     }
   });
 
+  it("Ctrl+Alt+G returns to main without stopping the selected child", () => {
+    const h = setup();
+    h.screen.handleInput("\x1b[103;7u");
+    assert.equal(h.closed(), 1);
+    assert.equal(h.stopped(), 0);
+  });
+
   it("automatic settlement or an unexpected exit restores main", () => {
     const h = setup();
     h.agent.emit("settled");

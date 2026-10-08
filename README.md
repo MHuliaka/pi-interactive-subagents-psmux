@@ -20,7 +20,7 @@ If the package is already installed in Pi, update its checkout, install its depe
 The main conversation has a blue **Subagents** block. It shows up to five recent agents so a large delegation doesn't fill the terminal. All agents are accessible through the selector.
 
 - Click a row in the block to open that agent in **fullscreen terminal mode**.
-- Use **Ctrl+Shift+G** or `/subagents` to select an agent with the keyboard.
+- Use **Ctrl+Alt+G** or `/subagents` to select an agent with the keyboard.
 - Use `/subagents <name>` to open a particular agent directly.
 
 Opening an agent covers the terminal with its conversation, streaming response, thinking, tool arguments/results, usage, and message input. The main session remains active underneath, with its history and editor untouched. Other agents continue running.
@@ -30,7 +30,7 @@ The same blue border contains **← Return to main agent**.
 | Control in subagent view | Action |
 | --- | --- |
 | Click **Return to main agent**, or press **Esc** | Return without stopping the child |
-| **Ctrl+Shift+G** | Return to main |
+| **Ctrl+Alt+G** | Return to main |
 | **Enter** | Send input to this child, not the main agent |
 | **Shift+Enter** | Insert a newline; multiline paste is also supported |
 | **PgUp / PgDn**, mouse wheel | Scroll conversation |
