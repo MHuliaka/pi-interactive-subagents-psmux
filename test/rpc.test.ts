@@ -126,6 +126,23 @@ describe("RPC transport", () => {
 });
 
 describe("subagent lifecycle", () => {
+  it("runs legacy initial messages in order without reporting a premature result", async () => {
+    const h = harness();
+    const agent = new Subagent("worker", "worker", "task", "session", true, h.rpc);
+    agent.queueInitialMessages(["/skill:one", "/skill:two"]);
+    h.record({ type: "agent_settled", aborted: false });
+    await tick();
+    assert.equal(agent.live, true);
+    assert.deepEqual(h.commands.map((c) => c.message), ["/skill:one"]);
+    h.record({ type: "agent_settled", aborted: false });
+    await tick();
+    assert.equal(agent.live, true);
+    assert.deepEqual(h.commands.map((c) => c.message), ["/skill:one", "/skill:two"]);
+    h.record({ type: "agent_settled", aborted: false });
+    await h.rpc.closed;
+    await tick();
+    assert.equal(agent.phase, "completed");
+  });
   it("does not treat agent_end as completion, but exits after agent_settled", async () => {
     const h = harness();
     const agent = new Subagent("worker", "worker", "task", "session", true, h.rpc);

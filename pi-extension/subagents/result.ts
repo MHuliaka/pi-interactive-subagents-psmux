@@ -61,7 +61,7 @@ export function registerResultRenderer(pi: ExtensionAPI) {
     let card = cards.get(message);
     if (!card) {
       const content = typeof message.content === "string" ? message.content : message.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
-      const kind = message.customType === "subagent_error" ? "error" : message.customType === "subagent_question" ? "question" : "result";
+      const kind = message.customType === "subagent_error" || (message.details as any)?.phase === "failed" || (message.details as any)?.errorMessage || ((message.details as any)?.exitCode ?? 0) !== 0 ? "error" : message.customType === "subagent_question" ? "question" : "result";
       card = new SubagentResultCard(content, options.expanded, kind, theme);
       cards.set(message, card);
     } else card.syncExpanded(options.expanded);

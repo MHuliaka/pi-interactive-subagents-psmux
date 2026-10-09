@@ -6,8 +6,9 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 /**
  * Subagent config file (`subagents.json` in the pi agent directory).
  *
- * The `models` section controls optional model selection for subagents.
- * Other keys (including legacy `status`) are preserved on write but not used.
+ * The independent `status` and `models` sections retain their original schema.
+ * Status rendering/transition settings are parsed by status.ts; other keys are
+ * preserved on write.
  *
  * The `models` section is opt-in. When the key is absent, sub-agent models come
  * from the agent frontmatter exactly as before, so existing installations are
@@ -679,7 +680,7 @@ export function resolveLoadoutModel(input: {
   return resolveModelToken({
     ...input,
     token: configuredToken ?? input.loadout.model,
-    agentName: input.loadout.agent,
+    agentName: null,
     source,
     thinking,
   });

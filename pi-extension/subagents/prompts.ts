@@ -1,15 +1,13 @@
-import { readFileSync } from "node:fs";
-import { dirname } from "node:path";
-
-/** Expand every requested profile skill into ONE initial RPC prompt/turn. */
-export function buildTaskWithSkills(task: string, skills: string | undefined, commands: any[]): string {
+/** Reproduce the old CLI message order. Blank-session @file content is the
+ * initial prompt; skill commands follow it. Fork sessions receive skills first
+ * and the raw task last. Let Pi expand skill commands, not a substitute parser. */
+export function buildInitialPrompts(task: string, skills: string | undefined, commands: any[], artifact: boolean): string[] {
   const names = (skills ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-  const blocks = names.map((name) => {
-    const command = commands.find((c) => c.source === "skill" && c.name === `skill:${name}`);
-    const path = command?.sourceInfo?.path;
-    if (!path) throw new Error(`Skill "${name}" is not available in the subagent's working directory.`);
-    const content = readFileSync(path, "utf8").replace(/\r\n/g, "\n").replace(/^---\n[\s\S]*?\n---\n?/, "").trim();
-    return `Skill: ${name}\nLocation: ${path}\nReferences are relative to ${dirname(path)}.\n\n${content}`;
-  });
-  return [...blocks, task].join("\n\n");
+  for (const name of names) {
+    if (!commands.some((c) => c.source === "skill" && c.name === `skill:${name}`)) {
+      throw new Error(`Skill "${name}" is not available in the subagent's working directory.`);
+    }
+  }
+  const prompts = names.map((name) => `/skill:${name}`);
+  return artifact ? [task, ...prompts] : [...prompts, task];
 }

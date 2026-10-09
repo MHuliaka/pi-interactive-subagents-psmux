@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { QUESTION_DESCRIPTION, QUESTION_SNIPPET, QUESTION_GUIDELINES, QUESTION_ACK } from "./contract.ts";
 import { Type } from "@sinclair/typebox";
 
 /** Child control is protocol-native: no sidecars, polling, or auto-exit hooks. */
@@ -22,12 +23,14 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", () => { process.off("disconnect", disconnect); });
   pi.registerTool({
     name: "ask_question",
-    label: "Ask Parent",
-    description: "Ask the parent agent a question when you need a decision. After calling, stop your turn and wait for its reply.",
-    parameters: Type.Object({ question: Type.String() }),
+    label: "ask_question",
+    description: QUESTION_DESCRIPTION,
+    promptSnippet: QUESTION_SNIPPET,
+    promptGuidelines: QUESTION_GUIDELINES,
+    parameters: Type.Object({ question: Type.String({ description: "The single freeform question to ask the orchestrator. Include enough context to answer it directly." }) }),
     async execute(_id, params) {
       pi.appendEntry("subagent_question", { question: params.question });
-      return { content: [{ type: "text", text: "Question sent to the parent. Stop here and wait for its reply." }], details: { question: params.question } };
+      return { content: [{ type: "text", text: QUESTION_ACK }], details: { question: params.question } };
     },
   });
 }

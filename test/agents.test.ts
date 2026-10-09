@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { discoverAgentDefinitions } from "../pi-extension/subagents/agents.ts";
-import { buildTaskWithSkills } from "../pi-extension/subagents/prompts.ts";
+import { buildInitialPrompts } from "../pi-extension/subagents/prompts.ts";
 
 it("discovers package/global/project profiles with correct priority and CRLF parsing", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-profiles-"));
@@ -18,12 +18,13 @@ it("discovers package/global/project profiles with correct priority and CRLF par
     process.env.PI_CODING_AGENT_DIR = global;
     process.chdir(project);
     writeFileSync(join(global, "agents", "worker.md"), "---\nname: worker\nmodel: global/model\n---\nGlobal instructions");
-    writeFileSync(join(project, ".pi", "agents", "worker.md"), "---\r\nname: worker\r\nmodel: project/model\r\nauto-exit: false\r\nsession-mode: fork\r\nsubagent_agents: scout, researcher\r\nsystem-prompt: replace\r\ndisable-model-invocation: true\r\n---\r\nProject instructions");
+    writeFileSync(join(project, ".pi", "agents", "worker.md"), "---\r\nname: worker\r\nmodel: project/model\r\nauto-exit: false\r\ninteractive: false\r\nsession-mode: fork\r\nsubagent_agents: scout, researcher\r\nsystem-prompt: replace\r\ndisable-model-invocation: true\r\n---\r\nProject instructions");
     const definitions = discoverAgentDefinitions();
     const worker = definitions.find((d) => d.name === "worker")!;
     assert.equal(worker.source, "project");
     assert.equal(worker.model, "project/model");
     assert.equal(worker.autoExit, false);
+    assert.equal(worker.interactive, false);
     assert.equal(worker.sessionMode, "fork");
     assert.equal(worker.systemPromptMode, "replace");
     assert.equal(worker.disableModelInvocation, true);
@@ -38,7 +39,7 @@ it("discovers package/global/project profiles with correct priority and CRLF par
   }
 });
 
-it("expands multiple child skills into one initial task, without losing the task or leaking frontmatter", () => {
+it("preserves the old CLI skill/task message order and delegates skill expansion to Pi", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-skills-"));
   try {
     const first = join(root, "one.md");
@@ -49,13 +50,9 @@ it("expands multiple child skills into one initial task, without losing the task
       { name: "skill:one", source: "skill", sourceInfo: { path: first } },
       { name: "skill:two", source: "skill", sourceInfo: { path: second } },
     ];
-    const prompt = buildTaskWithSkills("Do the task", "one,two", commands);
-    assert.ok(prompt.includes("First instructions"));
-    assert.ok(prompt.includes("Second instructions"));
-    assert.ok(prompt.endsWith("Do the task"));
-    assert.ok(!prompt.includes("description: first"));
-    assert.ok(prompt.includes(root));
-    assert.equal(buildTaskWithSkills("task", undefined, []), "task");
-    assert.throws(() => buildTaskWithSkills("task", "missing", commands), /not available/);
+    assert.deepEqual(buildInitialPrompts("Do the task", "one,two", commands, true), ["Do the task", "/skill:one", "/skill:two"]);
+    assert.deepEqual(buildInitialPrompts("Do the task", "one,two", commands, false), ["/skill:one", "/skill:two", "Do the task"]);
+    assert.deepEqual(buildInitialPrompts("task", undefined, [], false), ["task"]);
+    assert.throws(() => buildInitialPrompts("task", "missing", commands, false), /not available/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

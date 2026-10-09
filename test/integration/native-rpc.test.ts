@@ -58,7 +58,8 @@ it("relays a three-level tree and routes user input through the real Pi RPC exte
   const dir = mkdtempSync(join(tmpdir(), "pi native tree spaces "));
   const agentDir = join(dir, "agent");
   mkdirSync(join(agentDir, "agents"), { recursive: true });
-  writeFileSync(join(agentDir, "agents", "branch.md"), "---\nname: branch\nmodel: inherit\ntools: read\nsubagent_agents: branch, scout\n---\nTest branch\n");
+  writeFileSync(join(agentDir, "agents", "branch.md"), "---\nname: branch\nmodel: inherit\ntools: read\nauto-exit: true\nsubagent_agents: branch-mid, scout\n---\nTest branch\n");
+  writeFileSync(join(agentDir, "agents", "branch-mid.md"), "---\nname: branch-mid\nmodel: inherit\ntools: read\nauto-exit: true\nsubagent_agents: scout\n---\nTest middle branch\n");
   const wrapper = fileURLToPath(new URL("./fixtures/native-tree.ts", import.meta.url));
   const control = fileURLToPath(new URL("../../pi-extension/subagents/control.ts", import.meta.url));
   const session = join(dir, "session.jsonl");

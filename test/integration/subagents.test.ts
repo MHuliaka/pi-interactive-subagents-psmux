@@ -12,13 +12,36 @@ const root = mkdtempSync(join(tmpdir(), "pi rpc integration "));
 const previousDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = join(root, "agent");
 mkdirSync(join(root, "agent", "agents"), { recursive: true });
-writeFileSync(join(root, "agent", "agents", "branch.md"), "---\nname: branch\nmodel: inherit\ntools: read\nsubagent_agents: branch, scout\n---\nTest branch\n");
+writeFileSync(join(root, "agent", "agents", "branch.md"), "---\nname: branch\nmodel: inherit\ntools: read\nauto-exit: true\nsubagent_agents: branch-mid, scout\n---\nTest branch\n");
+writeFileSync(join(root, "agent", "agents", "branch-mid.md"), "---\nname: branch-mid\nmodel: inherit\ntools: read\nauto-exit: true\nsubagent_agents: scout\n---\nTest middle branch\n");
 const { default: extension } = await import("../../pi-extension/subagents/index.ts");
 const fixture = fileURLToPath(new URL("./fixtures/pi-rpc.mjs", import.meta.url));
 after(() => {
   if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = previousDir;
   rmSync(root, { recursive: true, force: true });
+});
+
+it("keeps the agent-visible spawn/list/steer and task-file handoff contract", async () => {
+  const h = await setup();
+  try {
+    const listed = await h.execute("subagents_list", {});
+    assert.match(listed.content[0].text, /• scout/);
+    assert.ok(!listed.content[0].text.startsWith("{"));
+    const spawned = await h.execute("subagent", { agent: "scout", name: "legacy", task: "HOLD" });
+    assert.match(spawned.content[0].text, /Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce\./);
+    assert.equal(spawned.details.task, "HOLD");
+    const history = await h.processes[0].request("get_messages");
+    const prompt = history.messages.find((m: any) => m.role === "user").content;
+    const text = typeof prompt === "string" ? prompt : prompt.map((c: any) => c.text ?? "").join("");
+    assert.match(text, /^<file name="[^"]+">\n/);
+    assert.match(text, /Complete your task autonomously\. When you are finished, simply stop — your session ends automatically\./);
+    assert.match(text, /Your FINAL assistant message should summarize what you accomplished\./);
+    const steered = await h.execute("subagent_message", { name: "legacy", message: "HOLD" });
+    assert.equal(steered.content[0].text, 'Message delivered to running subagent "legacy". It picks this up at its next turn boundary. If it exits, its result still arrives as a steer message.');
+    const missing = await h.execute("subagent_message", { name: "missing", message: "work" });
+    assert.equal(missing.content[0].text, 'No subagent named "missing" in this session. Known subagents: legacy.');
+  } finally { await h.shutdown(); }
 });
 
 async function setup() {
@@ -138,7 +161,7 @@ it("question flow stays alive, reply completes, and crash restores the selected 
     await waitFor(() => h.results.some((r) => r.details?.name === "crasher"));
     assert.equal(h.results.find((r) => r.details?.name === "crasher").details.phase, "failed");
     assert.equal(h.results.filter((r) => r.details?.name === "crasher").length, 1);
-    assert.equal(h.results.find((r) => r.details?.name === "crasher").customType, "subagent_error");
+    assert.equal(h.results.find((r) => r.details?.name === "crasher").customType, "subagent_result");
   } finally { await h.shutdown(); }
 });
 
@@ -274,8 +297,8 @@ it("ancestor crash restores main, reports the error in chat and terminates the o
     assert.equal(v.state.returned, 1);
     assert.equal(v.state.consume, undefined);
     await waitSessions(h, (s) => s.find((a) => a.name === "one/leaf")?.phase === "failed");
-    await waitFor(() => h.results.some((r) => r.customType === "subagent_error"));
-    assert.ok(h.results.some((r) => r.customType === "subagent_error" && r.content.includes("one")));
+    await waitFor(() => h.results.some((r) => r.details?.phase === "failed"));
+    assert.ok(h.results.some((r) => r.details?.phase === "failed" && r.content.includes("one")));
     await new Promise((resolve) => setTimeout(resolve, 350));
     const heartbeat = readFileSync(leaf.sessionFile + ".heartbeat", "utf8");
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -338,7 +361,9 @@ it("launch/validation errors also dismiss an unrelated subagent view and appear 
   try {
     await h.execute("subagent", { agent: "scout", name: "one", task: "HOLD" });
     const v = view(h, "one");
-    await assert.rejects(h.execute("subagent", { agent: "does-not-exist", task: "test" }), /Unknown or disallowed/);
+    const rejected = await h.execute("subagent", { agent: "does-not-exist", task: "test" });
+    assert.equal(rejected.details.error, "unknown agent");
+    assert.match(rejected.content[0].text, /You may not spawn the "does-not-exist" agent/);
     await v.done;
     assert.equal(v.state.returned, 1);
     assert.ok(h.entries.some((r) => r.data?.customType === "subagent_error" && r.data.content.includes("does-not-exist")));
@@ -383,7 +408,7 @@ it("crashing an intermediate ancestor closes the deepest view and cleans its bra
     await v.done;
     assert.equal(v.state.returned, 1);
     await waitSessions(h, (s) => s.find((a) => a.name === "one/middle/leaf")?.phase === "failed");
-    assert.ok(h.entries.some((r) => r.data?.customType === "subagent_error" && r.data.content.includes("one/middle")));
+    assert.ok(h.entries.some((r) => r.data?.details?.phase === "failed" && r.data.content.includes("one/middle")));
     await new Promise((resolve) => setTimeout(resolve, 350));
     const heartbeat = readFileSync(leaf.sessionFile + ".heartbeat", "utf8");
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -411,7 +436,8 @@ it("an error dismisses an open selector exactly once and allows reopening a conv
   try {
     await h.execute("subagent", { agent: "scout", name: "one", task: "HOLD" });
     const picker = view(h, "");
-    await assert.rejects(h.execute("subagent", { agent: "invalid-profile", task: "test" }), /Unknown or disallowed/);
+    const rejected = await h.execute("subagent", { agent: "invalid-profile", task: "test" });
+    assert.equal(rejected.details.error, "unknown agent");
     await picker.done;
     assert.equal(picker.state.returned, 1);
     assert.equal(picker.state.consume, undefined);

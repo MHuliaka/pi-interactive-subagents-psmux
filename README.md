@@ -68,6 +68,7 @@ Only these extension-generated messages go to the **delegating agent's** model c
 
 - Tool-call acknowledgements/results for its own `subagent`, `subagent_message`, or explicitly requested `subagents_list` calls.
 - Final results/cancellation status, questions requiring a reply, and terminal failures from agents it owns.
+- Original stall/recovery notifications when `status.enabled` is true and the owned agent is not interactive.
 
 Streaming text, thinking, child tool arguments/results, retry diagnostics, widget updates, dialogs, usage statistics, and navigation do not get copied into main context. The root can display descendant results/questions/failures, but those are non-context `subagent_ui` session entries; the descendant's actual owner receives its model-facing notification. Message `details` (session paths, stats, ownership metadata) are not included in Pi's LLM conversion of custom messages.
 
@@ -97,7 +98,7 @@ The main agent receives:
 
 - **subagent** — launch a profile in the background. `agent` chooses the profile; `name` is an optional unique follow-up handle. `task` is required. Optional `model` and `cwd` overrides are supported.
 - **subagent_message** — send a follow-up to a live child or resume a finished child by name with its saved conversation and tool loadout.
-- **subagents_list** — list available profiles, effective models, and session statuses. Results arrive automatically; polling is unnecessary.
+- **subagents_list** — list available profiles and effective models. Results arrive automatically; polling is unnecessary.
 
 Example:
 
@@ -143,10 +144,11 @@ Supported fields:
 | `tools` | Comma-separated tool allowlist |
 | `model`, `thinking` | Defaults; model config can override them |
 | `system-prompt: append` / `replace` | Apply the Markdown body as a system prompt; otherwise include it in the task |
-| `auto-exit` | Defaults to true; end the background process after the task settles |
+| `auto-exit` | Defaults to false, as in the original; true ends the process after the task settles |
+| `interactive` | Suppresses stall/recovery messages to the orchestrator; defaults to the inverse of `auto-exit` |
 | `session-mode` | `standalone` (default), `lineage-only`, or `fork` |
 | `cwd` | Working directory; relative profile paths resolve from the Pi agent directory |
-| `skills` or `skill` | Comma-separated skill names; load instructions from the child's resource catalogue into the initial task |
+| `skills` or `skill` | Comma-separated skill names; preserve the original CLI message order and let Pi expand the child's skill commands |
 | `subagent_agents` | Profiles this child may delegate to; grants the spawning tools |
 | `disable-model-invocation: true` | Manual launch through `/subagent` only |
 
@@ -175,6 +177,7 @@ Selections are stored in `<Pi agent directory>/subagents.json`, respecting `PI_C
 
 ```json
 {
+  "status": { "enabled": true },
   "models": {
     "default": "inherit",
     "thinking": "medium",
@@ -189,7 +192,7 @@ Selections are stored in `<Pi agent directory>/subagents.json`, respecting `PI_C
 
 Resolution: per-agent config → explicit spawn model → global config default → profile model. `inherit` follows the parent's active model, including on resume. Thinking levels are clamped to model capabilities when validation is enabled. Fallback policies are `inherit`, `default`, or `fail`.
 
-Without a `models` section, profile defaults are preserved. The old package-root `config.json` is still readable for migration; new selections are written to the durable agent directory. Legacy `status` settings are no longer used.
+Without a `models` section, profile defaults are preserved. The old package-root `config.json` is still readable for migration; new selections are written to the durable agent directory. `status.enabled` retains its original meaning: it enables detailed activity/status rendering and stall/recovery notifications. It defaults to true in the shipped configuration. Interactive agents still show status but do not wake their orchestrator on stalls/recovery; resumed sessions are always autonomous. The original 60-second stall classifier and four-line notification cap are retained, using RPC health observations instead of activity files.
 
 ## Sessions and lifecycle
 
@@ -228,9 +231,13 @@ Automated tests are not a substitute for a manual live-provider and interactive-
 
 Agent profiles, tool permissions, named delegation and follow-ups, model/thinking selection, questions to the delegating agent, saved conversations, and resume remain available.
 
+The agent-facing tool schemas, descriptions, guidance, acknowledgements, task wrappers, and question/result/failure templates are restored from the last Psmux revision (`d521b48`). Historical pane terminology in these model-facing strings is deliberately preserved. Terminal failures again use the `subagent_result` contract; red error styling is a rendering decision, not a new message protocol. The original task-file handoff and skill-command ordering are also retained. Golden baseline tests guard against accidental wording/schema changes.
+
+UI diagnostics and observer copies remain non-context entries. This prevents backend/view implementation details from appearing as additional instructions or duplicated outcomes in a resumed agent conversation.
+
 ### Compatibility changes
 
 - Uses the current `@earendil-works` Pi packages.
 - Pi-only agent profiles; the previous Claude integration was removed.
-- Legacy `interactive`, status, and stall-ping settings are no longer used.
+- Original configuration names, model precedence/fallback, profile `interactive`/`auto-exit` defaults, and `status.enabled` remain supported. `PI_SUBAGENT_SHELL_READY_DELAY_MS` retains its original parsing and 500 ms default, applied as a startup-readiness delay after the RPC handshake.
 - Existing saved Pi sessions/loadouts/name registries remain usable, but old live multiplexer tabs cannot be reattached.

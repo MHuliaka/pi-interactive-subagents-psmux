@@ -87,7 +87,7 @@ async function command(request) {
     if (request.message.includes("CRASH")) { process.stderr.write("fixture crash"); process.exit(2); }
     if (request.message.includes("NEST3") || request.message.includes("NESTED")) {
       const deep = request.message.includes("NEST3");
-      await tools.get("subagent").execute("nested", { agent: deep ? "branch" : "scout", name: deep ? "middle" : "leaf", task: deep ? "NESTED HOLD" : "HOLD" }, undefined, undefined, ctx);
+      await tools.get("subagent").execute("nested", { agent: deep ? "branch-mid" : "scout", name: deep ? "middle" : "leaf", task: deep ? "NESTED HOLD" : "HOLD" }, undefined, undefined, ctx);
       complete("Waiting for nested children");
       return;
     }

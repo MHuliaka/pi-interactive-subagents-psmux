@@ -36,11 +36,11 @@ export function orderAgents(agents: Subagent[]): Subagent[] {
   return result;
 }
 /** Align existing row fields without changing arrows, nesting or separators. */
-export function formatAgentRows(agents: Subagent[], width: number): string[] {
+export function formatAgentRows(agents: Subagent[], width: number, statusEnabled = true): string[] {
   if (!agents.length) return [];
   const cells = agents.map((a) => [
     ` ${"  ".repeat(a.depth)}${a.depth ? "↳" : "›"} ${clean(a.name)}`,
-    `(${clean(a.agent)})`, a.phase, clean(a.activity), `${a.elapsed}s`,
+    `(${clean(a.agent)})`, statusEnabled ? a.statusKind ?? a.phase : a.phase, statusEnabled ? clean(a.activity) : "", `${a.elapsed}s`,
   ]);
   const sizes = Array.from({ length: 5 }, (_, column) => Math.max(...cells.map((row) => visibleWidth(row[column]))));
   const separators = [" ", " · ", " · ", " · "];
@@ -82,14 +82,14 @@ export function guardComponent<T extends Component>(component: T, onError: (erro
 /** The only custom visual treatment: blue subagent information/navigation. */
 export class SubagentWidget implements Component {
   private shown: Subagent[] = [];
-  constructor(private readonly agents: () => Subagent[], private readonly open: (agent?: Subagent) => void, private readonly onError: (error: unknown) => void = () => {}) {}
+  constructor(private readonly agents: () => Subagent[], private readonly open: (agent?: Subagent) => void, private readonly onError: (error: unknown) => void = () => {}, private readonly statusEnabled = true) {}
   invalidate() {}
   render(width: number) {
     try {
       const agents = orderAgents(this.agents()).filter((a) => a.live);
       this.shown = agents.slice(-5);
       if (!agents.length) return [];
-      const rows = formatAgentRows(this.shown, Math.max(0, width - 2));
+      const rows = formatAgentRows(this.shown, Math.max(0, width - 2), this.statusEnabled);
       return blueBox(`Subagents · ${agents.length} active`, rows, width);
     } catch (error) { this.onError(error); return []; }
   }

@@ -13,13 +13,16 @@ import { buildModelPickerItems, ModelPickerComponent, type ModelPickerItem, type
 import { PiRpc, type RpcRecord } from "./rpc.ts";
 import { Subagent } from "./runtime.ts";
 import { SubagentScreen, SubagentWidget, guardComponent, orderAgents, clean } from "./view.ts";
-import { buildTaskWithSkills } from "./prompts.ts";
+import { buildInitialPrompts } from "./prompts.ts";
 import { ChildDialog } from "./dialog.ts";
 import { SUBAGENT_SHORTCUT } from "./shortcuts.ts";
 import { RemoteConnection, TreeBridge, type TreePacket } from "./tree.ts";
 import { nativePresentation, nativeKeybindings, prepareNativeRenderers, pinWidgetFirst } from "./native-context.ts";
 import { registerResultRenderer } from "./result.ts";
+import { loadStatusConfig, capStatusLines, formatStatusAggregate } from "./status.ts";
+import { StatusMonitor } from "./status-monitor.ts";
 import { filterContext, filterSummaryEntries } from "./context-policy.ts";
+import { SPAWN_DESCRIPTION, LIST_DESCRIPTION, MESSAGE_DESCRIPTION, MESSAGE_SNIPPET, spawnAcknowledgement, steerAcknowledgement, resumeAcknowledgement, resultPresentation, questionPresentation, taskPresentation } from "./contract.ts";
 
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 const SPAWNING_TOOLS = ["subagent", "subagent_message", "subagents_list"];
@@ -47,11 +50,11 @@ function getToolExtensionPath(tool: string): string | undefined {
 }
 
 const SubagentParams = Type.Object({
-  agent: Type.String({ description: "Agent profile to launch (worker, scout, researcher, or a custom profile)." }),
-  task: Type.String({ description: "Task for the subagent." }),
-  name: Type.Optional(Type.String({ description: "Unique display name and persistent follow-up handle." })),
-  model: Type.Optional(Type.String({ description: "Model override, subject to /subagent-model configuration." })),
-  cwd: Type.Optional(Type.String({ description: "Working directory; relative paths resolve from the parent cwd." })),
+  agent: Type.String({ description: "Which agent to spawn (e.g. 'worker', 'scout', 'researcher'). This loads the agent's " + "fixed profile — its model, tool loadout, and system prompt. Must be one of the available agents." }),
+  task: Type.String({ description: "Task/prompt for the sub-agent" }),
+  name: Type.Optional(Type.String({ description: "Optional cosmetic label for the subagent's pane and widget row. Defaults to the agent name. " + "Has no effect on which agent runs — use `agent` for that." })),
+  model: Type.Optional(Type.String({ description: "Model override (overrides global/agent defaults unless the agent is pinned via /subagent-model)" })),
+  cwd: Type.Optional(Type.String({ description: "Working directory for the sub-agent. The agent starts in this folder and picks up its local .pi/ config, CLAUDE.md, skills, and extensions. Use for role-specific subfolders." })),
 });
 
 function applySandboxToParts(parts: string[], loadout: SubagentLoadout, opts: { artifactDir: string; name: string; model?: string | null; thinking?: string | null }) {
@@ -98,6 +101,8 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
   let dismiss: (() => void) | undefined;
   let removeViewInput: (() => void) | undefined;
   let interval: ReturnType<typeof setInterval> | undefined;
+  const statusConfig = loadStatusConfig();
+  const statusMonitor = new StatusMonitor();
   let widgetActive = false;
   let redrawWidget: (() => void) | undefined;
   let dialogQueue = Promise.resolve();
@@ -224,7 +229,7 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
       if (live && !widgetActive) {
         ctx.ui.setWidget("subagent-status", (tui) => {
           redrawWidget = () => tui.requestRender();
-          return new SubagentWidget(() => Array.from(agents.values()), (agent) => { void openView(agent); }, (error) => reportError(undefined, error));
+          return new SubagentWidget(() => Array.from(agents.values()), (agent) => { void openView(agent); }, (error) => reportError(undefined, error), statusConfig.enabled);
         }, { placement: "aboveEditor" });
         widgetActive = true;
         pinWidgetFirst(ctx, "subagent-status");
@@ -291,6 +296,7 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
     try { dismiss?.(); } catch { /* UI teardown must never prevent process cleanup. */ }
     try { cancelDialog?.(); } catch { /* Exit listeners will also release dialogs. */ }
     if (interval) clearInterval(interval);
+    statusMonitor.clear();
     try { ctx?.ui.setWidget("subagent-status", undefined); } catch { /* Parent UI is already closing. */ }
     widgetActive = false;
     redrawWidget = undefined;
@@ -335,7 +341,17 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
     }
     for (const agent of agents.values()) agent.parentId = agents.get(agent.name.slice(0, agent.name.lastIndexOf("/")))?.id;
     updateWidget();
-    if (context.mode === "tui") interval = setInterval(updateWidget, 1000);
+    interval = setInterval(() => {
+      if (statusConfig.enabled) {
+        const lines = statusMonitor.tick(Array.from(agents.values()));
+        if (lines.length) {
+          const capped = capStatusLines(lines, statusConfig.lineLimit);
+          pi.sendMessage({ customType: "subagent_status", content: formatStatusAggregate(lines, statusConfig.lineLimit), display: true,
+            details: { lines: capped.visibleLines, overflow: capped.overflow } }, { triggerTurn: true, deliverAs: "steer" });
+        }
+      }
+      updateWidget();
+    }, 1000);
   });
   pi.on("session_shutdown", cleanup);
 
@@ -356,7 +372,7 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
       if (!bridge.hasParent) context.ui.notify(clean(String(text)), level ?? "info");
     });
     agent.on("question", (question) => {
-      if (!disposed) sendToChat(agent, { customType: "subagent_question", content: `Subagent "${agent.name}" asks:\n\n${question}\n\nReply with subagent_message({ name: ${JSON.stringify(agent.name)}, message: "…" }).`, display: true,
+      if (!disposed) sendToChat(agent, { customType: "subagent_question", content: questionPresentation(agent.name, agent.elapsed, question), display: true,
         details: { name: agent.name, delivery: agent.rpc?.remote ? "observer" : "owner" } });
     });
     agent.onDialog = (record) => {
@@ -417,15 +433,13 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
       try { stats = existsSync(agent.sessionFile) ? summarizeSessionStats(agent.sessionFile) : null; }
       catch (error) { reportError(agent, error); }
       if (agent.phase === "failed") reportedErrors.add(`${agent.id}:${agent.error ?? agent.summary}`);
-      sendToChat(agent, { customType: agent.phase === "failed" ? "subagent_error" : "subagent_result", content: agent.phase === "failed"
-        ? `Subagent "${agent.name}" failed (${agent.elapsed}s).\n\n${agent.error ?? agent.summary}`
-        : `Subagent "${agent.name}" ${agent.phase} (${agent.elapsed}s).\n\n${agent.summary}\n\nFollow up with subagent_message({ name: ${JSON.stringify(agent.name)}, message: "…" }).`, display: true,
-        details: { name: agent.name, agent: agent.agent, delivery: agent.rpc?.remote ? "observer" : "owner", phase: agent.phase, sessionFile: agent.sessionFile, stats, parent: agent.parentId ? byId(agent.parentId)?.name : undefined } });
+      sendToChat(agent, { customType: "subagent_result", content: resultPresentation({ exitCode: agent.exitCode ?? (agent.phase === "failed" ? 1 : 0), elapsed: agent.elapsed, summary: agent.summary, errorMessage: agent.phase === "failed" ? agent.error : undefined }, agent.name), display: true,
+        details: { name: agent.name, task: agent.task, agent: agent.agent, exitCode: agent.exitCode ?? (agent.phase === "failed" ? 1 : 0), elapsed: agent.elapsed, sessionId: getSessionId(agent.sessionFile), errorMessage: agent.phase === "failed" ? agent.error : undefined, delivery: agent.rpc?.remote ? "observer" : "owner", phase: agent.phase, sessionFile: agent.sessionFile, stats, parent: agent.parentId ? byId(agent.parentId)?.name : undefined } });
     });
     updateWidget();
   }
 
-  async function launch(name: string, task: string, loadout: SubagentLoadout, sessionFile: string, context: ExtensionContext, skills?: string, override?: ResolvedModel) {
+  async function launch(name: string, task: string, loadout: SubagentLoadout, sessionFile: string, context: ExtensionContext, skills?: string, override?: ResolvedModel, originalTask = task, artifact = false, interactive = !loadout.autoExit) {
     if (disposed) throw new Error("Parent session is shutting down.");
     const resolved = override ?? resolveLoadoutModel({ loadout, config: loadSubagentConfig(), catalog: buildModelCatalog(context) });
     if (resolved.error) throw new Error(resolved.error);
@@ -436,7 +450,7 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
     if (!args.includes(control)) args.push("-e", control);
     const env = { ...process.env };
     // Never leak the parent's child identity, wait state, or delegation grant.
-    for (const key of Object.keys(env)) if (key.startsWith("PI_SUBAGENT_")) delete env[key];
+    for (const key of Object.keys(env)) if (key.startsWith("PI_SUBAGENT_") && key !== "PI_SUBAGENT_SHELL_READY_DELAY_MS") delete env[key];
     env.PI_SUBAGENT_ID = randomUUID();
     env.PI_SUBAGENT_NAME = name;
     if (loadout.agent) env.PI_SUBAGENT_AGENT = loadout.agent;
@@ -447,20 +461,27 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
     let rpc: PiRpc;
     try { rpc = (dependencies.createRpc ?? ((args, options) => new PiRpc(args, options)))(args, { cwd: loadout.cwd ?? context.cwd, env }); }
     catch (error) { throw new Error(`Could not start "${name}": ${String(error)}`); }
-    const agent = new Subagent(name, loadout.agent ?? "subagent", task, sessionFile, loadout.autoExit, rpc, env.PI_SUBAGENT_ID);
+    const agent = new Subagent(name, loadout.agent ?? "subagent", originalTask, sessionFile, loadout.autoExit, rpc, env.PI_SUBAGENT_ID);
+    agent.interactive = interactive;
     agent.model = resolved.command ?? undefined;
     agent.thinking = resolved.thinking ?? undefined;
     attach(agent, context);
     try {
       // Handshake ensures listeners are installed before sending the task.
       await rpc.request("get_state");
+      const delayRaw = process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS?.trim();
+      const delayParsed = delayRaw ? Number.parseInt(delayRaw, 10) : Number.NaN;
+      const delay = Number.isFinite(delayParsed) && delayParsed >= 0 ? delayParsed : 500;
+      await new Promise<void>((resolve) => setTimeout(resolve, delay));
       const history = await rpc.request("get_messages");
       agent.loadMessages(history?.messages ?? []);
       agent.loadEntries(getActiveSessionEntries(sessionFile));
       agent.model = resolved.command ?? agent.model;
       // Read the CHILD's resource catalogue (its cwd/config may differ from ours).
       const commands = skills?.trim() ? (await rpc.request("get_commands"))?.commands ?? [] : [];
-      await agent.send(buildTaskWithSkills(task, skills, commands));
+      const prompts = buildInitialPrompts(task, skills, commands, artifact);
+      agent.queueInitialMessages(prompts.slice(1));
+      await agent.send(prompts[0]);
       return agent;
     } catch (error) { await agent.fail(error); throw error; }
   }
@@ -495,49 +516,88 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
     const identityInSystem = !!definition.systemPromptMode;
     const loadout: SubagentLoadout = { agent: params.agent, toolAllowlist: tools.size ? [...tools].join(",") : null, model: resolvedModel.token, thinking: resolvedModel.thinking,
       identity: identityInSystem ? definition.body ?? null : null, systemPromptMode: definition.systemPromptMode ?? null,
-      spawnable: definition.subagentAgents ?? null, autoExit: definition.autoExit ?? true, cwd, agentDir };
+      spawnable: definition.subagentAgents ?? null, autoExit: definition.autoExit ?? false, cwd, agentDir };
     writeSubagentLoadout(sessionFile, loadout);
-    const task = `${!identityInSystem && definition.body ? definition.body + "\n\n" : ""}Task:\n\n${params.task}\n\nComplete the task and summarize your result in your final response. Use ask_question if you need a decision.`;
-    return launch(name, task, loadout, sessionFile, context, definition.skills, resolvedModel);
+    let task = taskPresentation(params.task, definition.body, definition.systemPromptMode, definition.autoExit, definition.sessionMode);
+    if (definition.sessionMode !== "fork") {
+      // Preserve the CLI @file handoff visible to the child, not just its prose.
+      const safeName = name.toLowerCase().replace(/[^a-z0-9\s-]/g, "").replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const path = join(artifactDir(context), "context", `${safeName || "subagent"}-${timestamp}.md`);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, task, "utf8");
+      task = `<file name="${path}">\n${task}\n</file>\n`;
+    }
+    return launch(name, task, loadout, sessionFile, context, definition.skills, resolvedModel, params.task, definition.sessionMode !== "fork", definition.interactive ?? !(definition.autoExit ?? false));
   }
 
-  pi.registerTool({ name: "subagent", label: "Subagent", description: "Launch an isolated Pi subagent in the background. Results arrive automatically; do not poll. The user can open it inside the main tab.", parameters: SubagentParams,
+  pi.registerTool({ name: "subagent", label: "Subagent", description: SPAWN_DESCRIPTION, promptSnippet: SPAWN_DESCRIPTION, parameters: SubagentParams,
     async execute(_id, params, _signal, _update, context) {
       return withErrors(undefined, async () => {
+        const currentAgent = process.env.PI_SUBAGENT_AGENT;
+        if (currentAgent && params.agent === currentAgent) return {
+          content: [{ type: "text" as const, text: `You are the ${currentAgent} agent — do not start another ${currentAgent}. You were spawned to do this work yourself. Complete the task directly.` }],
+          details: { error: "self-spawn blocked" },
+        };
+        const permitted = discoverAgentDefinitions().map((a) => a.name);
+        const rejected = !params.agent ? "agent required" : !permitted.includes(params.agent) ? process.env.PI_SUBAGENT_ALLOWED !== undefined ? "agent not in allowlist" : "unknown agent" : undefined;
+        if (rejected) {
+          const list = permitted.join(", ") || "(none)";
+          const text = !params.agent ? `You must specify which agent to spawn via the "agent" field. Available agents: ${list}.`
+            : `You may not spawn the "${params.agent}" agent — it is not ${process.env.PI_SUBAGENT_ALLOWED !== undefined ? "in your allowlist" : "a known agent"}. Available agents: ${list}.`;
+          reportError(undefined, text);
+          return { content: [{ type: "text" as const, text }], details: { error: rejected } };
+        }
+        if (!context.sessionManager.getSessionFile()) return { content: [{ type: "text" as const, text: "Error: no session file. Start pi with a persistent session to use subagents." }], details: { error: "no session file" } };
         const agent = await spawnAgent(params, context);
-        return { content: [{ type: "text" as const, text: `Started "${agent.name}" (${agent.agent}). Results will arrive automatically. Follow up using subagent_message with this name.` }], details: { name: agent.name, sessionFile: agent.sessionFile } };
+        return { content: [{ type: "text" as const, text: spawnAcknowledgement(agent.name) }], details: { id: agent.id, name: agent.name, task: params.task, agent: agent.agent, sessionFile: agent.sessionFile } };
       });
     } });
 
-  pi.registerTool({ name: "subagent_message", label: "Message Subagent", description: "Send a message to a live subagent, or resume a finished subagent's saved session with its original profile and tools.", parameters: Type.Object({ name: Type.String(), message: Type.String() }),
+  pi.registerTool({ name: "subagent_message", label: "Message Subagent", description: MESSAGE_DESCRIPTION, promptSnippet: MESSAGE_SNIPPET, parameters: Type.Object({ name: Type.String({ description: "Exact display name of the subagent. Steers it if it is still running; resumes its session if it has finished." }), message: Type.String({ description: "The message to deliver: a follow-up instruction for a running subagent, or the next task for a resumed session." }) }),
     async execute(_id, params, _signal, _update, context) {
       return withErrors(agents.get(params.name), async () => {
-        if (!params.message.trim()) throw new Error("Message must not be empty.");
-        const existing = agents.get(params.name);
-        if (existing?.live) await existing.send(params.message);
-        else {
+        const name = params.name?.trim();
+        const failure = (text: string) => ({ content: [{ type: "text" as const, text }], details: { error: text } });
+        if (!name) return failure("Provide the subagent's `name` to steer (if running) or resume (if finished).");
+        const existing = agents.get(name);
+        if (existing?.live) {
+          if (!params.message?.trim()) return failure("`message` is required to steer a running subagent.");
+          await existing.send(params.message.trim());
+          return { content: [{ type: "text" as const, text: steerAcknowledgement(existing.name) }], details: { id: existing.id, name: existing.name, status: "steered" } };
+        } else {
           if (existing?.rpc && !existing.finishedAt) throw new Error("Subagent is still closing. Wait for its result before resuming.");
-          const entry = readNameRegistry(artifactDir(context))[params.name];
-          if (!entry || !existsSync(entry.sessionFile)) throw new Error(`No saved subagent named "${params.name}".`);
+          const registry = readNameRegistry(artifactDir(context));
+          const entry = registry[name];
+          if (!entry) return failure(`No subagent named "${name}" in this session. ` + (Object.keys(registry).length ? `Known subagents: ${Object.keys(registry).join(", ")}.` : "No subagents have been spawned in this session yet."));
+          if (!entry.sessionFile || !existsSync(entry.sessionFile)) return failure(`Subagent "${name}" is registered but its session file is gone (${entry.sessionFile}). It cannot be resumed. Spawn a fresh subagent instead.`);
           const loadout = readSubagentLoadout(entry.sessionFile);
-          if (!loadout) throw new Error("Missing loadout snapshot; refusing an unrestricted resume.");
-          await launch(params.name, params.message, { ...loadout, autoExit: true }, entry.sessionFile, context);
+          if (!loadout) return failure(`Cannot safely resume "${name}": no sandbox snapshot found for this session (it predates sandboxed resume, or its .loadout.json sidecar was removed). Resuming would relaunch with all global extensions and the full toolset, so this is refused. Re-run the task as a fresh subagent instead.`);
+          const resolved = resolveLoadoutModel({ loadout, config: loadSubagentConfig(), catalog: buildModelCatalog(context) });
+          if (resolved.error) return failure(`Cannot resume "${name}": ${resolved.error}`);
+          const resumed = await launch(name, params.message, { ...loadout, autoExit: true }, entry.sessionFile, context, undefined, resolved);
+          return { content: [{ type: "text" as const, text: resumeAcknowledgement(name) }], details: { id: resumed.id, name, sessionId: entry.sessionId ?? getSessionId(entry.sessionFile) ?? name, sessionFile: entry.sessionFile, status: "started" } };
         }
-        return { content: [{ type: "text" as const, text: `Message delivered to "${params.name}". Results arrive automatically.` }], details: { name: params.name } };
       });
     } });
 
-  pi.registerTool({ name: "subagents_list", label: "List Subagents", description: "List available profiles and spawned agents. Not needed to poll for results.", parameters: Type.Object({}),
+  pi.registerTool({ name: "subagents_list", label: "List Subagents", description: LIST_DESCRIPTION, promptSnippet: LIST_DESCRIPTION, parameters: Type.Object({}),
     async execute(_id, _params, _signal, _update, context) {
       return withErrors(undefined, async () => {
         const config = loadSubagentConfig();
         const catalog = buildModelCatalog(context);
         const profiles = discoverAgentDefinitions().filter((a) => !a.disableModelInvocation).map((a) => {
           const resolved = resolveSubagentModel({ agentName: a.name, agentModel: a.model ?? null, agentThinking: a.thinking ?? null, param: null, config, catalog });
-          return { name: a.name, description: a.description, model: a.model, tools: a.tools, effectiveModel: resolved.command, modelSource: resolved.source, modelLabel: `${resolved.command ?? "default"} · ${formatModelSource(resolved.source)}` };
+          const modelTag = resolved.command ? ` [${resolved.command} · ${formatModelSource(resolved.source)}]` : resolved.error || resolved.warning ? ` [${a.model ?? "model"} unavailable]` : "";
+          return { ...a, effectiveModel: resolved.command, modelSource: resolved.source, modelInherited: resolved.inherited, modelProblem: resolved.warning ?? resolved.error ?? null, modelTag };
         });
         const sessions = orderAgents(Array.from(agents.values())).map((a) => ({ name: a.name, agent: a.agent, phase: a.phase, activity: a.activity, parent: a.parentId ? byId(a.parentId)?.name : undefined }));
-        return { content: [{ type: "text" as const, text: JSON.stringify({ profiles, sessions }, null, 2) }], details: { agents: profiles, sessions } };
+        if (!profiles.length) return { content: [{ type: "text" as const, text: "No subagent definitions found." }], details: { agents: [], sessions } };
+        const lines = profiles.map((a) => `• ${a.name}${a.source === "project" ? " (project)" : ""}${a.modelTag}${a.description ? ` — ${a.description}` : ""}`);
+        const known = new Set(profiles.map((a) => a.name));
+        const unknown = Object.keys(config.models?.agents ?? {}).filter((name) => !known.has(name)).sort();
+        if (unknown.length) lines.push(`Warning: models.agents names with no matching agent: ${unknown.join(", ")}`);
+        return { content: [{ type: "text" as const, text: lines.join("\n") }], details: { agents: profiles, sessions } };
       });
     } });
 

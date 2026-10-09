@@ -22,6 +22,9 @@ export class Subagent extends EventEmitter {
   revision = 0;
   activity = "starting";
   error?: string;
+  exitCode?: number;
+  interactive = false;
+  statusKind?: string;
   model?: string;
   thinking?: string;
   draft = "";
@@ -30,6 +33,8 @@ export class Subagent extends EventEmitter {
   private activeMessage = -1;
   private waitingAnswer = false;
   private children = 0;
+  private initialMessages: string[] = [];
+  queueInitialMessages(messages: string[]) { this.initialMessages = [...messages]; }
   private finalizing = false;
   private reported = false;
   private cancelled = false;
@@ -53,6 +58,7 @@ export class Subagent extends EventEmitter {
       rpc.on("fault", fault);
       this.removeRecord = () => { rpc.off("record", listener); rpc.off("fault", fault); };
       void rpc.closed.then(({ code, error, phase }) => {
+        this.exitCode = code;
         if (rpc.remote && phase) {
           this.phase = phase;
           this.error = error;
@@ -203,6 +209,12 @@ export class Subagent extends EventEmitter {
         this.messages.push({ role: "custom", customType: "Extension error", content: event.error || "Unknown extension error", display: true });
         break;
       case "agent_settled":
+        if (!event.aborted && !this.error && !this.waitingAnswer && this.initialMessages.length) {
+          const message = this.initialMessages.shift()!;
+          this.phase = "running"; this.activity = "working";
+          void this.send(message).catch((error) => this.fail(error));
+          break;
+        }
         // agent_end is NOT final: automatic retries and queued prompts may follow it.
         this.emit("settled");
         if (this.rpc?.remote) {
@@ -239,6 +251,7 @@ export class Subagent extends EventEmitter {
     if (this.reported || !this.rpc) return;
     if (this.finalizing) { await this.rpc?.closed; return; }
     this.cancelled = true;
+    this.initialMessages = [];
     this.error = undefined;
     this.finalizing = true;
     this.phase = "cancelled";
