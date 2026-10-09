@@ -60,7 +60,7 @@ Mouse interaction is supported by Pi's fullscreen mode. Keyboard navigation also
 
 Main-chat subagent results appear as compact blue cards, collapsed by default. Subagent questions use gray-background cards, also collapsed by default; their full text still reaches the delegating agent. Click a card to expand/collapse it, or use Pi's tool-expansion shortcut (normally **Ctrl+O**). Terminal failures use blue frames with an **Error** heading and visible failure details.
 
-The active-subagent widget has no bottom shortcut/count hint. It is registered once while agents are active, rather than replaced on every stream update. It stays first in the above-editor widget area with a blank separator below the blue frame, keeping observation-memory progress underneath instead of swapping positions during updates.
+The active-subagent widget has no bottom shortcut/count hint. It is registered once while agents are active, rather than replaced on every stream update. It stays first in the above-editor widget area without an extra blank row below the blue frame, keeping observation-memory progress underneath instead of swapping positions during updates.
 
 ### Model-context boundary
 

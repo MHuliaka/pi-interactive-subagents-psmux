@@ -53,14 +53,18 @@ export function formatAgentRows(agents: Subagent[], width: number): string[] {
     const reduction = Math.min(overflow, Math.max(0, sizes[column] - minimum));
     sizes[column] -= reduction; overflow -= reduction;
   }
+  const remaining = Math.max(0, width - sizes.reduce((sum, size) => sum + size, 0) - 10);
+  const rightMargin = remaining > 0 ? 1 : 0;
+  const timeGap = " ".repeat(Math.max(0, remaining - rightMargin));
   return cells.map((row) => {
     const columns = row.map((cell, column) => {
       const text = column === 1 && visibleWidth(cell) > sizes[column]
         ? `(${truncateToWidth(cell.slice(1, -1), Math.max(0, sizes[column] - 2))})`
         : truncateToWidth(cell, sizes[column], column === 0 ? "..." : "…");
-      return text + " ".repeat(Math.max(0, sizes[column] - visibleWidth(text)));
+      const padding = " ".repeat(Math.max(0, sizes[column] - visibleWidth(text)));
+      return column === 4 ? padding + text : text + padding;
     });
-    return truncateToWidth(columns.map((column, i) => column + (separators[i] ?? "")).join(""), Math.max(0, width), "");
+    return truncateToWidth(columns.map((column, i) => column + (i === 3 ? timeGap : "") + (separators[i] ?? "")).join("") + " ".repeat(rightMargin), Math.max(0, width), "");
   });
 }
 export function guardComponent<T extends Component>(component: T, onError: (error: unknown) => void): T {
@@ -86,7 +90,7 @@ export class SubagentWidget implements Component {
       this.shown = agents.slice(-5);
       if (!agents.length) return [];
       const rows = formatAgentRows(this.shown, Math.max(0, width - 2));
-      return [...blueBox(`Subagents · ${agents.length} active`, rows, width), ""];
+      return blueBox(`Subagents · ${agents.length} active`, rows, width);
     } catch (error) { this.onError(error); return []; }
   }
   handleMouse(event: TuiMouseEvent) {

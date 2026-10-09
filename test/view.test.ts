@@ -102,6 +102,19 @@ describe("in-tab view", () => {
     assert.equal((rows[0].match(/ · /g) ?? []).length, 3, "no new separators");
   });
 
+  it("anchors elapsed time to the right edge and right-aligns different digit counts", () => {
+    const agents = [new Subagent("short", "worker", "task", "s", true), new Subagent("parent/仕事 😀", "scout", "task", "s", true)];
+    Object.defineProperty(agents[0], "elapsed", { get: () => 9 });
+    Object.defineProperty(agents[1], "elapsed", { get: () => 123 });
+    for (const width of [60, 100, 150]) {
+      const rows = formatAgentRows(agents, width);
+      for (const row of rows) assert.equal(visibleWidth(row), width);
+      assert.ok(rows[0].endsWith("  9s "));
+      assert.ok(rows[1].endsWith("123s "));
+      assert.equal(visibleWidth(rows[0].slice(0, rows[0].indexOf("("))), visibleWidth(rows[1].slice(0, rows[1].indexOf("("))));
+    }
+  });
+
   it("truncates long names with three dots without pushing other columns", () => {
     const agents = [new Subagent("an-extremely-long-agent-name-".repeat(4), "worker", "task", "s", true), new Subagent("short", "scout", "task", "s", true)];
     for (const agent of agents) { agent.phase = "running"; agent.activity = "thinking"; }
@@ -120,7 +133,7 @@ describe("in-tab view", () => {
     let clicked: Subagent | undefined;
     const widget = new SubagentWidget(() => agents, (agent) => clicked = agent);
     const lines = widget.render(80);
-    assert.equal(lines.length, 8);
+    assert.equal(lines.length, 7);
     assert.ok(lines.some((line) => line.includes("15 active")));
     widget.handleMouse({ type: "click", button: "left", y: 1 } as any);
     assert.equal(clicked, agents[10]);

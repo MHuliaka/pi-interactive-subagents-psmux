@@ -443,7 +443,7 @@ it("keeps the subagent widget stable above observation progress throughout strea
     assert.equal(h.widgets.get("subagent-status"), factory);
     assert.deepEqual([...h.widgets.keys()], ["subagent-status", "observations"]);
     const lines = widget.render(100);
-    assert.equal(lines.at(-1), "", "reserve a separator below the blue frame");
+    assert.ok(lines.at(-1)?.includes("╯"), "do not add an extra blank row before observation progress");
     assert.ok(!lines.join("\n").includes("/subagents"));
     assert.ok(!lines.join("\n").includes("Ctrl+Alt+G"));
     assert.equal(h.widgets.get("observations"), observation);
