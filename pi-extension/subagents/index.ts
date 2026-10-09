@@ -18,6 +18,7 @@ import { ChildDialog } from "./dialog.ts";
 import { SUBAGENT_SHORTCUT } from "./shortcuts.ts";
 import { RemoteConnection, TreeBridge, type TreePacket } from "./tree.ts";
 import { nativePresentation, nativeKeybindings, prepareNativeRenderers } from "./native-context.ts";
+import { registerResultRenderer } from "./result.ts";
 
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 const SPAWNING_TOOLS = ["subagent", "subagent_message", "subagents_list"];
@@ -79,6 +80,7 @@ const CLEANUP_KEY = Symbol.for("pi-subagents/rpc-cleanup");
 (globalThis as any)[CLEANUP_KEY]?.();
 
 export default function subagentsExtension(pi: ExtensionAPI, dependencies: { createRpc?: (args: string[], options: SpawnOptionsWithoutStdio) => PiRpc } = {}) {
+  registerResultRenderer(pi);
   latestPi = pi;
   const agents = new Map<string, Subagent>();
   let ctx: ExtensionContext | undefined;

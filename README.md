@@ -56,6 +56,8 @@ Every conversation uses the same fullscreen view and **Return to main agent** al
 
 Mouse interaction is supported by Pi's fullscreen mode. Keyboard navigation also works in regular mode. Tool images follow Pi's native terminal-capability and image settings. The only extension-specific conversation decoration is the blue subagent information/return block.
 
+Main-chat subagent results appear as compact blue cards, collapsed by default. Click a card to expand/collapse its complete result, or use Pi's tool-expansion shortcut (normally **Ctrl+O**).
+
 ### Native rendering and layout extensions
 
 The view uses Pi's actual `UserMessageComponent`, `AssistantMessageComponent`, `ToolExecutionComponent`, summary/custom-message components, native dialogs, and `CustomEditor`. It reuses the main session's live tool-renderer resolution, Markdown transformers, custom-message/entry renderers, theme, and custom editor factory. A presentation extension loaded in the main Pi session therefore also affects subagent conversations; no extension factories are run again merely to obtain renderers.
