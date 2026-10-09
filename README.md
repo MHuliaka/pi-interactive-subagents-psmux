@@ -2,7 +2,7 @@
 
 Run isolated Pi agents concurrently and view their conversations **inside the main terminal tab**. No terminal multiplexer, extra tabs, PowerShell, or shell launch scripts are required.
 
-Requires **Pi 1.1+** (`@earendil-works/pi-coding-agent`) and a `pi` executable on `PATH`. The extension assumes `spawn("pi", args)` works on the host. Its backend uses Node processes, filesystem APIs, and Pi's JSONL RPC protocol on Windows, macOS, and Linux. An agent's own shell commands still depend on the tools available on that OS.
+Requires a **JavaScript installation of Pi 1.1+** (`@earendil-works/pi-coding-agent`). Children run Pi's declared CLI directly through the current runtime (`process.execPath`); a `pi` executable or Windows command shim on `PATH` is not required. The backend uses Node processes, filesystem APIs, JSONL RPC, and Node IPC on Windows, macOS, and Linux. An agent's own shell commands still depend on the tools available on that OS. Standalone compiled executables without a JavaScript CLI are not supported.
 
 ## Load
 
@@ -35,9 +35,21 @@ The same blue border contains **← Return to main agent**.
 | **Shift+Enter** | Insert a newline; multiline paste is also supported |
 | **PgUp / PgDn**, mouse wheel | Scroll conversation |
 | **Ctrl+Home / Ctrl+End** | Oldest output / follow live output |
-| **Ctrl+C**, **Ctrl+D**, or submit `/exit` | Stop this child and return to main |
+| **Ctrl+C**, **Ctrl+D**, or submit `/exit` | Stop this child and its descendants, and return to main |
 
-**When the selected child settles, fails, or exits, the view automatically returns to main.** Stopping one child does not abort the main agent or any sibling. Returning manually retains an unsent child draft for the next visit. Completed conversations remain available to inspect.
+**When the selected child settles, fails, or exits, the view automatically returns to main.** Stopping one child also stops its descendants, but does not abort the main agent or any sibling. Returning manually retains an unsent child draft for the next visit. Completed conversations remain available to inspect.
+
+### Nested agents and errors
+
+The root selector includes the entire agent tree, not just direct children. Descendants have indented rows and unambiguous path handles, such as `worker/recon` or `worker/reviewer/scout`. Use those full handles with `/subagents`, `/subagent-stop`, and `subagent_message`. New local names cannot contain slashes or control characters.
+
+Every conversation uses the same fullscreen view and **Return to main agent** always returns to the root main session, never an intermediate parent. Messages and dialogs route through the owning processes; task results still go to the agent that delegated the task.
+
+- A parent finishing its own turn stays alive while its children work. This does not close a view of a busy descendant.
+- Stopping an ancestor closes descendant views immediately and cancels that branch. Siblings continue.
+- An ancestor crashing closes descendant views and cleans up known orphan processes. Children also abort/shut down if their parent IPC connection disappears.
+- Launch, provider, tool, extension, routing, and guarded viewer/dialog errors dismiss the subagent UI and post a **Subagent error** message in the main chat. Recoverable tool/retry errors do not cancel otherwise healthy agents. Pi appends the chat message at the next safe turn boundary if the main agent is currently streaming.
+- Finished descendants retain their saved sessions and loadouts. Resuming one from the root starts it as a directly owned background agent; it does not revive a dead ancestor.
 
 Mouse interaction is supported by Pi's fullscreen mode. Keyboard navigation also works in regular mode. Images are represented by placeholders; this is a structured conversation viewer, not an embedded child terminal or a clone of every native Pi screen.
 
@@ -155,7 +167,7 @@ Without a `models` section, profile defaults are preserved. The old package-root
 
 ## Process and exit lifecycle
 
-Children start with `pi --mode rpc` using direct argument arrays, `cwd`, and environment variables, never a shell command. Tasks and subsequent messages go over stdin; stdout carries structured events. Stderr is retained for crash diagnostics.
+The launcher reads `bin.pi` from the running SDK's package directory and starts `[CLI path, "--mode", "rpc", …]` through the current runtime, using raw argument arrays, `cwd`, and environment variables, never a shell command. Missing CLI/runtime files produce actionable startup errors. Tasks and subsequent messages go over stdin; stdout carries structured events. Stderr is retained for crash diagnostics. A separate IPC channel relays descendant conversations and routes controls, without copying streaming deltas into ancestor session files.
 
 Completion waits for **agent_settled**, not `agent_end`, because retries, compaction, and queued work can continue after an agent run ends. On normal completion the child stdin closes so Pi can flush its session and shut down. Cancellation clears queued work before aborting, then closes stdin. A bounded kill fallback handles unresponsive processes.
 
@@ -179,6 +191,6 @@ npm run test:integration
 npm run typecheck
 ```
 
-Tests use Node's TypeScript transform support. Unit tests cover RPC framing, failures, shutdown, streamed messages, nested-child/question waiting, model configuration, persistence, and UI navigation. Integration tests launch real subprocesses implementing a deterministic Pi RPC fixture, exercising concurrency, resume, questions, crashes, and selected-child cancellation without provider credentials. A separate smoke test loads the extension in the real Pi RPC runtime, checks its commands, and verifies clean shutdown without making a model call.
+Tests use Node's TypeScript transform support. Unit tests cover CLI resolution, RPC/IPC framing and failures, shutdown, streamed messages, nested-child/question waiting, model configuration, persistence, and guarded UI navigation. Integration tests launch real nested subprocesses implementing a deterministic Pi RPC fixture, exercising deep viewing, message routing, ancestor cancellation/crashes, orphan cleanup, dialogs, resume, and chat error reporting without provider credentials. Real Pi smoke tests exercise the production launcher with an empty `PATH`, and the actual extension loader/IPC routing with a three-level tree, without making model calls.
 
 The fixture tests are not a substitute for a manual live-provider/terminal check on each supported OS.

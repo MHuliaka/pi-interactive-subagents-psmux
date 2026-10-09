@@ -6,7 +6,7 @@ import { SUBAGENT_SHORTCUT, SUBAGENT_SHORTCUT_HINT } from "./shortcuts.ts";
 const BLUE = "\x1b[38;2;77;163;255m";
 const RESET = "\x1b[0m";
 // Never allow child output to inject terminal control sequences.
-export const clean = (value: string) => value.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
+export const clean = (value: string) => value.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
 
 export function blueBox(title: string, content: string[], width: number): string[] {
   if (width < 2) return Array(content.length + 2).fill(width === 1 ? `${BLUE}│${RESET}` : "");
@@ -19,23 +19,63 @@ export function blueBox(title: string, content: string[], width: number): string
   }), `${BLUE}╰${"─".repeat(inner)}╯${RESET}`];
 }
 
+/** Stable pre-order: descendants sit below their parent even during concurrent launches. */
+export function orderAgents(agents: Subagent[]): Subagent[] {
+  const ids = new Set(agents.map((a) => a.id));
+  const children = new Map<string | undefined, Subagent[]>();
+  for (const agent of agents) {
+    const parent = agent.parentId && ids.has(agent.parentId) ? agent.parentId : undefined;
+    const list = children.get(parent) ?? [];
+    list.push(agent);
+    children.set(parent, list);
+  }
+  const result: Subagent[] = [];
+  const seen = new Set<string>();
+  const visit = (agent: Subagent) => {
+    if (seen.has(agent.id)) return;
+    seen.add(agent.id);
+    result.push(agent);
+    for (const child of children.get(agent.id) ?? []) visit(child);
+  };
+  for (const root of children.get(undefined) ?? []) visit(root);
+  for (const agent of agents) visit(agent);
+  return result;
+}
+
+/** Guard modal callbacks so a bad child record cannot crash the parent's TUI. */
+export function guardComponent<T extends Component>(component: T, onError: (error: unknown) => void): T {
+  for (const method of ["render", "handleInput", "handleMouse", "invalidate"] as const) {
+    const original = (component as any)[method];
+    if (typeof original !== "function") continue;
+    (component as any)[method] = (...args: any[]) => {
+      try { return original.apply(component, args); }
+      catch (error) { onError(error); return method === "render" ? [] : undefined; }
+    };
+  }
+  return component;
+}
+
 /** Bounded widget: all agents remain accessible through the scrollable selector. */
 export class SubagentWidget implements Component {
   private shown: Subagent[] = [];
-  constructor(private readonly agents: () => Subagent[], private readonly open: (agent?: Subagent) => void) {}
+  constructor(private readonly agents: () => Subagent[], private readonly open: (agent?: Subagent) => void, private readonly onError: (error: unknown) => void = () => {}) {}
   invalidate() {}
   render(width: number) {
-    const agents = this.agents();
+    try { return this.renderWidget(width); }
+    catch (error) { this.onError(error); return []; }
+  }
+  private renderWidget(width: number) {
+    const agents = orderAgents(this.agents());
     this.shown = agents.slice(-5);
     const count = agents.filter((a) => a.live).length;
-    const rows = this.shown.map((a) => truncateToWidth(` › ${clean(a.name)} (${clean(a.agent)}) · ${a.phase} · ${clean(a.activity)} · ${a.rpc ? `${a.elapsed}s` : "saved"}`, Math.max(0, width - 2)));
+    const rows = this.shown.map((a) => truncateToWidth(` ${"  ".repeat(a.depth)}${a.depth ? "↳" : "›"} ${clean(a.name)} (${clean(a.agent)}) · ${a.phase} · ${clean(a.activity)} · ${a.rpc ? `${a.elapsed}s` : "saved"}`, Math.max(0, width - 2)));
     rows.push(` /subagents · ${SUBAGENT_SHORTCUT_HINT} · ${agents.length} total${agents.length > 5 ? " (last 5 shown)" : ""}`);
     return blueBox(`Subagents · ${count} running`, rows, width);
   }
   handleMouse(event: TuiMouseEvent) {
     if (event.type === "click" && event.button === "left") {
       const agent = this.shown[event.y - 1];
-      this.open(agent);
+      try { this.open(agent); } catch (error) { this.onError(error); }
       return { handled: true, render: true };
     }
     return undefined;
@@ -53,7 +93,7 @@ export class SubagentScreen implements Component {
   private viewportHeight = 1;
   private returnRow = 0;
   private cache?: { width: number; revision: number; lines: string[] };
-  private readonly onChange = () => this.tui.requestRender();
+  private readonly onChange = () => { try { this.tui.requestRender(); } catch (error) { this.fail(error); } };
   private readonly onSettled = () => this.close();
 
   constructor(private readonly tui: TUI, private readonly theme: Theme, readonly agent: Subagent, private readonly done: () => void) {
@@ -64,12 +104,12 @@ export class SubagentScreen implements Component {
     this.input.setText(agent.draft);
     agent.on("change", this.onChange);
     agent.on("settled", this.onSettled);
-    this.input.onSubmit = (message) => { void this.submit(message); };
+    this.input.onSubmit = (message) => { void this.submit(message).catch((error) => this.fail(error)); };
   }
 
   private async submit(message: string) {
     if (this.closed || this.sending || !message.trim()) return;
-    if (message.trim() === "/exit") { void this.agent.stop(); this.close(); return; }
+    if (message.trim() === "/exit") { void this.agent.stop().catch((error) => this.fail(error)); this.close(); return; }
     if (!this.agent.live) { this.input.setText(message); this.status = "Finished session. Use subagent_message to resume it."; this.onChange(); return; }
     this.sending = true;
     this.input.disableSubmit = true;
@@ -85,6 +125,7 @@ export class SubagentScreen implements Component {
       const draft = this.input.getExpandedText();
       this.input.setText(draft ? `${message}\n${draft}` : message);
       this.agent.draft = this.input.getExpandedText();
+      this.fail(error);
     }
     finally { this.sending = false; this.input.disableSubmit = false; if (!this.closed) this.onChange(); }
   }
@@ -92,15 +133,24 @@ export class SubagentScreen implements Component {
   close() {
     if (this.closed) return;
     this.closed = true;
-    this.agent.draft = this.input.getExpandedText();
-    this.dispose();
-    this.done();
+    try { this.agent.draft = this.input.getExpandedText(); }
+    finally { try { this.dispose(); } finally { this.done(); } }
+  }
+
+  private fail(error: unknown) {
+    let detail = String(error);
+    try { this.close(); } catch (failure) { detail += ` (closing view: ${String(failure)})`; }
+    this.agent.emit("fault", `Subagent view: ${detail}`);
   }
 
   handleInput(data: string) {
+    try { this.handleViewInput(data); } catch (error) { this.fail(error); }
+  }
+
+  private handleViewInput(data: string) {
     if (this.closed) return;
     if (matchesKey(data, "escape") || matchesKey(data, SUBAGENT_SHORTCUT)) this.close();
-    else if (matchesKey(data, "ctrl+c") || matchesKey(data, "ctrl+d")) { void this.agent.stop(); this.close(); }
+    else if (matchesKey(data, "ctrl+c") || matchesKey(data, "ctrl+d")) { void this.agent.stop().catch((error) => this.fail(error)); this.close(); }
     else if (matchesKey(data, "pageUp")) this.scrollBy(-this.viewportHeight);
     else if (matchesKey(data, "pageDown")) this.scrollBy(this.viewportHeight);
     else if (matchesKey(data, "ctrl+home")) this.scroll = 0;
@@ -110,6 +160,11 @@ export class SubagentScreen implements Component {
   }
 
   handleMouse(event: TuiMouseEvent) {
+    try { return this.handleViewMouse(event); }
+    catch (error) { this.fail(error); return { handled: true, render: true }; }
+  }
+
+  private handleViewMouse(event: TuiMouseEvent) {
     if (event.type === "wheel") { this.scrollBy(event.wheelDelta ?? 0); return { handled: true, render: true }; }
     if (event.type === "click" && event.button === "left" && event.y === this.returnRow) {
       this.close();
@@ -170,6 +225,11 @@ export class SubagentScreen implements Component {
   }
 
   render(width: number) {
+    try { return this.renderView(width); }
+    catch (error) { this.fail(error); return []; }
+  }
+
+  private renderView(width: number) {
     const height = Math.max(1, this.tui.terminal.rows);
     if (width < 4 || height < 9) return Array.from({ length: height }, (_, i) => truncateToWidth(i === 0 ? "Esc: Return to main agent" : "", width));
     this.input.focused = this.focused;
@@ -189,7 +249,7 @@ export class SubagentScreen implements Component {
     return [...header, ...visible, ...navigation, hint, ...inputLines].slice(0, height);
   }
 
-  invalidate() { this.cache = undefined; this.input.invalidate(); }
+  invalidate() { try { this.cache = undefined; this.input.invalidate(); } catch (error) { this.fail(error); } }
   dispose() {
     this.agent.off("change", this.onChange);
     this.agent.off("settled", this.onSettled);

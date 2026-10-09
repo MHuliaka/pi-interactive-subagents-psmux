@@ -1,14 +1,18 @@
 import { after, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { PiRpc } from "../../pi-extension/subagents/rpc.ts";
+import { initTheme } from "@earendil-works/pi-coding-agent";
+initTheme("dark", false);
 const root = mkdtempSync(join(tmpdir(), "pi rpc integration "));
 const previousDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+mkdirSync(join(root, "agent", "agents"), { recursive: true });
+writeFileSync(join(root, "agent", "agents", "branch.md"), "---\nname: branch\nmodel: inherit\ntools: read\nsubagent_agents: branch, scout\n---\nTest branch\n");
 const { default: extension } = await import("../../pi-extension/subagents/index.ts");
 const fixture = fileURLToPath(new URL("./fixtures/pi-rpc.mjs", import.meta.url));
 after(() => {
@@ -25,6 +29,7 @@ async function setup() {
   const results: any[] = [];
   const launches: any[] = [];
   const processes: PiRpc[] = [];
+  const packets: any[] = [];
   const ui: any = {
     notify() {}, setWidget() {}, onTerminalInput() { return () => {}; },
   };
@@ -44,13 +49,14 @@ async function setup() {
   };
   extension(api, { createRpc: (args, options) => {
     launches.push({ args, options });
-    const rpc = new PiRpc(args, options, (_command, rawArgs, opts) => spawn(process.execPath, [fixture, ...rawArgs.slice(2)], { ...opts, stdio: "pipe" }));
+    const rpc = new PiRpc(args, options, (_command, rawArgs, opts) => spawn(process.execPath, ["--experimental-transform-types", fixture, ...rawArgs.slice(3)], opts) as any);
+    rpc.on("tree", (packet) => packets.push(packet));
     processes.push(rpc);
     return rpc;
   } });
   await events.get("session_start")({}, ctx);
   const execute = (name: string, params: any) => tools.get(name).execute("test", params, undefined, undefined, ctx);
-  return { ctx, execute, commands, events, processes, results, launches, shutdown: () => events.get("session_shutdown")({}, ctx) };
+  return { ctx, execute, commands, events, processes, results, launches, packets, shutdown: () => events.get("session_shutdown")({}, ctx) };
 }
 async function waitFor(predicate: () => boolean) {
   const deadline = Date.now() + 5000;
@@ -135,5 +141,234 @@ it("stopping the selected agent returns to main without cancelling another child
     await h.shutdown();
     await Promise.all(h.processes.map((rpc) => rpc.closed));
     assert.equal(h.results.length, 1, "shutdown must not deliver results into a dead parent session");
+  } finally { await h.shutdown(); }
+});
+
+function view(h: Awaited<ReturnType<typeof setup>>, name: string) {
+  const state: { returned: number; component?: any; consume?: any } = { returned: 0 };
+  h.ctx.mode = "tui";
+  h.ctx.ui.onTerminalInput = (handler: any) => { state.consume = handler; return () => { state.consume = undefined; }; };
+  h.ctx.ui.custom = (factory: any) => new Promise<void>((resolve) => {
+    state.component = factory({ terminal: { rows: 30 }, requestRender() {} }, { fg: (_c: any, text: string) => text, bold: (text: string) => text }, {}, () => { state.returned++; resolve(); });
+  });
+  return { state, done: h.commands.get("subagents").handler(name, h.ctx) };
+}
+async function waitSessions(h: Awaited<ReturnType<typeof setup>>, predicate: (sessions: any[]) => boolean) {
+  const deadline = Date.now() + 10000;
+  while (true) {
+    const sessions = (await h.execute("subagents_list", {})).details.sessions;
+    if (predicate(sessions)) return sessions;
+    if (Date.now() > deadline) throw new Error(`Tree test timed out: ${JSON.stringify(sessions)}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+it("opens a grandchild in the root tab, routes messages to it, and delivers completion to its owner", async () => {
+  const h = await setup();
+  try {
+    await h.execute("subagent", { agent: "branch", name: "one", task: "NESTED HOLD" });
+    await waitSessions(h, (s) => s.some((a) => a.name === "one/leaf" && a.phase === "running") && s.find((a) => a.name === "one")?.phase === "waiting");
+    const v = view(h, "one/leaf");
+    assert.equal(v.state.component.agent.name, "one/leaf");
+    assert.ok(v.state.component.render(100).some((line: string) => line.includes("Return to main agent")));
+    await h.execute("subagent_message", { name: "one/leaf", message: "COMPLETE root follow-up" });
+    await v.done;
+    assert.equal(v.state.returned, 1);
+    assert.equal(v.state.consume, undefined);
+    await waitSessions(h, (s) => s.every((a) => a.phase === "completed"));
+    assert.ok(h.results.some((r) => r.details?.name === "one/leaf" && r.details?.parent === "one"));
+    assert.ok(h.results.find((r) => r.details?.name === "one").content.includes("root follow-up"));
+    assert.equal(h.results.filter((r) => r.customType === "subagent_error").length, 0);
+  } finally { await h.shutdown(); }
+});
+
+it("returning manually from a deeply nested view keeps the entire branch running", async () => {
+  const h = await setup();
+  try {
+    await h.execute("subagent", { agent: "branch", name: "one", task: "NEST3" });
+    const sessions = await waitSessions(h, (s) => s.some((a) => a.name === "one/middle/leaf" && a.phase === "running"));
+    assert.deepEqual(sessions.map((a) => a.name), ["one", "one/middle", "one/middle/leaf"]);
+    const v = view(h, "one/middle/leaf");
+    v.state.component.handleInput("draft");
+    await h.execute("subagent_message", { name: "one/middle", message: "SETTLE own turn" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(v.state.returned, 0, "an ancestor settling its own turn must not close a busy descendant view");
+    v.state.consume("\x1b");
+    await v.done;
+    assert.equal(v.state.returned, 1);
+    assert.equal(v.state.component.agent.draft, "draft");
+    await waitSessions(h, (s) => s.find((a) => a.name === "one/middle/leaf")?.phase === "running");
+    assert.equal(h.results.filter((r) => r.customType === "subagent_result").length, 0);
+  } finally { await h.shutdown(); }
+});
+
+it("stopping an ancestor while viewing its grandchild returns immediately and preserves a sibling", async () => {
+  const h = await setup();
+  try {
+    await h.execute("subagent", { agent: "branch", name: "one", task: "NESTED HOLD" });
+    await h.execute("subagent", { agent: "scout", name: "sibling", task: "HOLD" });
+    await waitSessions(h, (s) => s.some((a) => a.name === "one/leaf" && a.phase === "running"));
+    const v = view(h, "one/leaf");
+    const stopping = h.commands.get("subagent-stop").handler("one", h.ctx);
+    assert.equal(v.state.returned, 1, "return must not wait for subprocess shutdown");
+    await v.done;
+    await stopping;
+    await waitSessions(h, (s) => s.find((a) => a.name === "one")?.phase === "cancelled" && s.find((a) => a.name === "one/leaf")?.phase === "cancelled");
+    assert.equal((await h.execute("subagents_list", {})).details.sessions.find((a: any) => a.name === "sibling").phase, "running");
+    assert.equal(h.results.filter((r) => r.customType === "subagent_error").length, 0);
+  } finally { await h.shutdown(); }
+});
+
+it("stopping a nested parent routes through its owner and closes the deeper view", async () => {
+  const h = await setup();
+  try {
+    await h.execute("subagent", { agent: "branch", name: "one", task: "NEST3" });
+    await waitSessions(h, (s) => s.some((a) => a.name === "one/middle/leaf" && a.phase === "running"));
+    const v = view(h, "one/middle/leaf");
+    const stopping = h.commands.get("subagent-stop").handler("one/middle", h.ctx);
+    assert.equal(v.state.returned, 1);
+    await v.done;
+    await stopping;
+    await waitSessions(h, (s) => s.find((a) => a.name === "one/middle")?.phase === "cancelled" && s.find((a) => a.name === "one/middle/leaf")?.phase === "cancelled");
+    assert.equal(h.results.filter((r) => r.customType === "subagent_error").length, 0);
+  } finally { await h.shutdown(); }
+});
+
+it("ancestor crash restores main, reports the error in chat and terminates the orphan", async () => {
+  const h = await setup();
+  try {
+    await h.execute("subagent", { agent: "branch", name: "one", task: "NESTED HOLD" });
+    await h.execute("subagent", { agent: "scout", name: "sibling", task: "HOLD" });
+    await waitSessions(h, (s) => s.some((a) => a.name === "one/leaf" && a.phase === "running"));
+    const leaf = h.packets.find((p) => p.kind === "spawn" && p.node.name === "leaf").node;
+    await waitFor(() => existsSync(leaf.sessionFile + ".heartbeat"));
+    const v = view(h, "one/leaf");
+    h.processes[0].process.kill();
+    await v.done;
+    assert.equal(v.state.returned, 1);
+    assert.equal(v.state.consume, undefined);
+    await waitSessions(h, (s) => s.find((a) => a.name === "one/leaf")?.phase === "failed");
+    await waitFor(() => h.results.some((r) => r.customType === "subagent_error"));
+    assert.ok(h.results.some((r) => r.customType === "subagent_error" && r.content.includes("one")));
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    const heartbeat = readFileSync(leaf.sessionFile + ".heartbeat", "utf8");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(readFileSync(leaf.sessionFile + ".heartbeat", "utf8"), heartbeat, "orphan process must no longer run");
+    assert.equal((await h.execute("subagents_list", {})).details.sessions.find((a: any) => a.name === "sibling").phase, "running");
+  } finally { await h.shutdown(); }
+});
+
+it("nested tool errors return to main with a chat error, without killing unrelated work", async () => {
+  const h = await setup();
+  try {
+    await h.execute("subagent", { agent: "branch", name: "one", task: "NESTED HOLD" });
+    await waitSessions(h, (s) => s.some((a) => a.name === "one/leaf" && a.phase === "running"));
+    const v = view(h, "one/leaf");
+    await h.execute("subagent_message", { name: "one/leaf", message: "TOOL_ERROR" });
+    await v.done;
+    assert.equal(v.state.returned, 1);
+    assert.ok(h.results.some((r) => r.customType === "subagent_error" && r.content.includes("one/leaf") && r.content.includes("fixture missing file")));
+    assert.equal((await h.execute("subagents_list", {})).details.sessions.find((a: any) => a.name === "one/leaf").phase, "running", "recoverable tool errors do not cancel the agent");
+  } finally { await h.shutdown(); }
+});
+
+it("malformed conversation rendering falls back to main and posts a visible chat error", async () => {
+  const h = await setup();
+  try {
+    await h.execute("subagent", { agent: "scout", name: "one", task: "HOLD" });
+    const v = view(h, "one");
+    v.state.component.agent.messages.push({ role: "assistant", content: {} });
+    assert.deepEqual(v.state.component.render(100), []);
+    await v.done;
+    assert.equal(v.state.returned, 1);
+    assert.ok(h.results.some((r) => r.customType === "subagent_error" && r.content.includes("Subagent view")));
+  } finally { await h.shutdown(); }
+});
+
+it("launch/validation errors also dismiss an unrelated subagent view and appear in main chat", async () => {
+  const h = await setup();
+  try {
+    await h.execute("subagent", { agent: "scout", name: "one", task: "HOLD" });
+    const v = view(h, "one");
+    await assert.rejects(h.execute("subagent", { agent: "does-not-exist", task: "test" }), /Unknown or disallowed/);
+    await v.done;
+    assert.equal(v.state.returned, 1);
+    assert.ok(h.results.some((r) => r.customType === "subagent_error" && r.content.includes("does-not-exist")));
+  } finally { await h.shutdown(); }
+});
+
+it("a nested blocking dialog is shown once at the root and ancestor stop releases it", async () => {
+  const h = await setup();
+  try {
+    await h.execute("subagent", { agent: "branch", name: "one", task: "NESTED HOLD" });
+    await waitSessions(h, (s) => s.some((a) => a.name === "one/leaf" && a.phase === "running"));
+    const v = view(h, "one/leaf");
+    let dialogs = 0;
+    let released = 0;
+    h.ctx.ui.custom = (factory: any) => new Promise((resolve) => {
+      dialogs++;
+      factory({ terminal: { rows: 30 }, requestRender() {} }, { fg: (_c: any, text: string) => text, bold: (text: string) => text }, {}, (response: any) => { released++; resolve(response); });
+    });
+    await h.execute("subagent_message", { name: "one/leaf", message: "DIALOG" });
+    await v.done;
+    await waitFor(() => dialogs > 0);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(dialogs, 1, "intermediate parents must not re-open the same forwarded dialog");
+    await h.commands.get("subagent-stop").handler("one", h.ctx);
+    assert.equal(released, 1, JSON.stringify(h.results));
+    assert.equal(v.state.consume, undefined);
+    assert.equal(h.results.filter((r) => r.customType === "subagent_error").length, 0);
+  } finally { await h.shutdown(); }
+});
+
+it("crashing an intermediate ancestor closes the deepest view and cleans its branch", async () => {
+  const h = await setup();
+  try {
+    await h.execute("subagent", { agent: "branch", name: "one", task: "NEST3" });
+    await waitSessions(h, (s) => s.some((a) => a.name === "one/middle/leaf" && a.phase === "running"));
+    const middle = h.packets.find((p) => p.kind === "spawn" && p.node.name === "middle").node;
+    const leaf = h.packets.find((p) => p.kind === "spawn" && p.node.name === "leaf").node;
+    await waitFor(() => existsSync(leaf.sessionFile + ".heartbeat"));
+    const v = view(h, "one/middle/leaf");
+    process.kill(middle.pid);
+    await v.done;
+    assert.equal(v.state.returned, 1);
+    await waitSessions(h, (s) => s.find((a) => a.name === "one/middle/leaf")?.phase === "failed");
+    assert.ok(h.results.some((r) => r.customType === "subagent_error" && r.content.includes("one/middle")));
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    const heartbeat = readFileSync(leaf.sessionFile + ".heartbeat", "utf8");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(readFileSync(leaf.sessionFile + ".heartbeat", "utf8"), heartbeat);
+  } finally { await h.shutdown(); }
+});
+
+it("unexpected modal creation failure reports an error and releases the waiting child", async () => {
+  const h = await setup();
+  try {
+    await h.execute("subagent", { agent: "branch", name: "one", task: "NESTED HOLD" });
+    await waitSessions(h, (s) => s.some((a) => a.name === "one/leaf" && a.phase === "running"));
+    const v = view(h, "one/leaf");
+    h.ctx.ui.custom = async () => { throw new Error("unexpected modal failure"); };
+    await h.execute("subagent_message", { name: "one/leaf", message: "DIALOG" });
+    await v.done;
+    await waitSessions(h, (s) => s.every((a) => a.phase === "completed"));
+    assert.equal(v.state.returned, 1);
+    assert.ok(h.results.some((r) => r.customType === "subagent_error" && r.content.includes("unexpected modal failure")));
+  } finally { await h.shutdown(); }
+});
+
+it("an error dismisses an open selector exactly once and allows reopening a conversation", async () => {
+  const h = await setup();
+  try {
+    await h.execute("subagent", { agent: "scout", name: "one", task: "HOLD" });
+    const picker = view(h, "");
+    await assert.rejects(h.execute("subagent", { agent: "invalid-profile", task: "test" }), /Unknown or disallowed/);
+    await picker.done;
+    assert.equal(picker.state.returned, 1);
+    assert.equal(picker.state.consume, undefined);
+    const reopened = view(h, "one");
+    assert.equal(reopened.state.component.agent.name, "one");
+    reopened.state.consume("\x1b");
+    await reopened.done;
   } finally { await h.shutdown(); }
 });

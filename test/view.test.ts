@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { SubagentScreen, SubagentWidget, blueBox } from "../pi-extension/subagents/view.ts";
+import { SubagentScreen, SubagentWidget, blueBox, orderAgents, guardComponent } from "../pi-extension/subagents/view.ts";
 import { Subagent } from "../pi-extension/subagents/runtime.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { initTheme } from "@earendil-works/pi-coding-agent";
@@ -119,6 +119,25 @@ describe("in-tab view", () => {
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(sent, "first line\nsecond line");
     h.screen.close();
+  });
+
+  it("groups descendants below their parent despite concurrent arrival order", () => {
+    const one = new Subagent("one", "worker", "task", "s", true);
+    const two = new Subagent("two", "worker", "task", "s", true);
+    const child = new Subagent("one/leaf", "scout", "task", "s", true);
+    child.parentId = one.id;
+    assert.deepEqual(orderAgents([one, two, child]).map((a) => a.name), ["one", "one/leaf", "two"]);
+    one.parentId = child.id; // Corrupted topology must not loop forever.
+    assert.equal(orderAgents([one, two, child]).length, 3);
+  });
+
+  it("guards dialog and selector callback failures without throwing into Pi's TUI", () => {
+    const errors: unknown[] = [];
+    const component = guardComponent({ render() { throw new Error("bad render"); }, invalidate() { throw new Error("bad invalidate"); }, handleInput() { throw new Error("bad input"); } }, (error) => errors.push(error));
+    assert.deepEqual(component.render(), []);
+    component.invalidate();
+    component.handleInput();
+    assert.equal(errors.length, 3);
   });
 
   it("borders use visible columns for Unicode and ANSI", () => {

@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
-import { PiRpc, type RpcRecord } from "./rpc.ts";
+import { randomUUID } from "node:crypto";
+import type { AgentConnection, RpcRecord } from "./rpc.ts";
 
 export type AgentPhase = "starting" | "running" | "waiting" | "completed" | "cancelled" | "failed";
 export interface ToolActivity {
@@ -13,6 +14,8 @@ export interface ToolActivity {
 /** Presentation and lifecycle state, independent of the parent terminal. */
 export class Subagent extends EventEmitter {
   phase: AgentPhase = "starting";
+  parentId?: string;
+  depth = 0;
   messages: any[] = [];
   tools = new Map<string, ToolActivity>();
   revision = 0;
@@ -38,24 +41,31 @@ export class Subagent extends EventEmitter {
     readonly task: string,
     readonly sessionFile: string,
     readonly autoExit: boolean,
-    readonly rpc?: PiRpc,
+    readonly rpc?: AgentConnection,
+    readonly id: string = randomUUID(),
   ) {
     super();
     if (rpc) {
       const listener = (record: RpcRecord) => this.receive(record);
+      const fault = (error: unknown) => this.emit("fault", String(error));
       rpc.on("record", listener);
-      this.removeRecord = () => rpc.off("record", listener);
-      void rpc.closed.then(({ code, error }) => {
-        if (!this.cancelled && (!this.finalizing || code !== 0)) {
+      rpc.on("fault", fault);
+      this.removeRecord = () => { rpc.off("record", listener); rpc.off("fault", fault); };
+      void rpc.closed.then(({ code, error, phase }) => {
+        if (rpc.remote && phase) {
+          this.phase = phase;
+          this.error = error;
+        } else if (!this.cancelled && (!this.finalizing || code !== 0)) {
           this.error = error || (code !== 0 ? `Pi exited with code ${code}` : "Subagent exited before completing its task");
           this.phase = "failed";
         }
+        if (this.error) this.emit("fault", this.error);
         this.finish();
       });
     }
   }
 
-  get live() { return !!this.rpc && !["completed", "cancelled", "failed"].includes(this.phase); }
+  get live() { return !!this.rpc && !this.finishedAt && !["completed", "cancelled", "failed"].includes(this.phase); }
   get elapsed() { return Math.floor(((this.finishedAt ?? Date.now()) - this.startedAt) / 1000); }
   get summary(): string {
     for (let i = this.messages.length - 1; i >= 0; i--) {
@@ -90,8 +100,16 @@ export class Subagent extends EventEmitter {
   changed() { this.revision++; this.emit("change"); }
 
   receive(event: RpcRecord) {
+    try { this.receiveRecord(event); }
+    catch (error) { void this.fail(new Error(`Invalid subagent event: ${String(error)}`)).catch((failure) => this.emit("fault", String(failure))); }
+  }
+
+  private receiveRecord(event: RpcRecord) {
     if (this.finalizing || this.cancelled) return;
     switch (event.type) {
+      case "response":
+        if (this.rpc?.remote && event.command === "get_messages" && event.success) this.loadMessages(event.data?.messages ?? []);
+        break;
       case "agent_start": this.phase = "running"; this.activity = "working"; break;
       case "message_start":
         if (event.message?.role === "toolResult") break; // Tool lifecycle renders this separately.
@@ -126,7 +144,7 @@ export class Subagent extends EventEmitter {
         if (event.message?.role === "toolResult") break;
         if (this.activeMessage >= 0) this.messages[this.activeMessage] = event.message;
         if (event.message?.model) this.model = event.message.provider ? `${event.message.provider}/${event.message.model}` : event.message.model;
-        if (event.message?.errorMessage) this.error = event.message.errorMessage;
+        if (event.message?.errorMessage) { this.error = event.message.errorMessage; this.emit("fault", this.error); }
         else if (event.message?.role === "assistant" && event.message.stopReason !== "error") this.error = undefined;
         break;
       case "tool_execution_start":
@@ -141,17 +159,19 @@ export class Subagent extends EventEmitter {
       case "tool_execution_end": {
         const tool = this.tools.get(event.toolCallId);
         if (tool) { tool.result = event.result; tool.state = event.isError ? "failed" : "completed"; }
+        if (event.isError) this.emit("fault", `${tool?.name ?? "Tool"} failed: ${(event.result?.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n") || "Unknown tool error"}`);
         break;
       }
       case "auto_retry_start":
+        if (event.errorMessage) this.emit("fault", event.errorMessage);
         this.activity = `retry ${event.attempt}`;
         this.messages.push({ role: "custom", customType: "Retry", content: `Attempt ${event.attempt}/${event.maxAttempts ?? "?"}: ${event.errorMessage ?? "retrying"}` });
         break;
-      case "auto_retry_end": if (!event.success) this.error = event.finalError; break;
+      case "auto_retry_end": if (!event.success) { this.error = event.finalError; if (this.error) this.emit("fault", this.error); } break;
       case "compaction_start": this.activity = "compacting"; break;
       case "compaction_end":
         if (event.result) this.messages.push({ role: "compactionSummary", summary: event.result.summary, usage: event.result.usage });
-        else if (event.errorMessage) this.messages.push({ role: "custom", customType: "Compaction error", content: event.errorMessage });
+        else if (event.errorMessage) { this.messages.push({ role: "custom", customType: "Compaction error", content: event.errorMessage }); this.emit("fault", event.errorMessage); }
         break;
       case "thinking_level_changed": this.thinking = event.level; break;
       case "entry_appended": {
@@ -167,11 +187,17 @@ export class Subagent extends EventEmitter {
         if (["select", "confirm", "input", "editor"].includes(event.method)) this.onDialog?.(event);
         else if (event.method === "notify") this.emit("notice", event.message, event.notifyType);
         break;
-      case "extension_error": this.emit("notice", event.error, "error"); break;
+      case "extension_error": this.emit("fault", event.error || "Unknown extension error"); break;
       case "agent_settled":
         // agent_end is NOT final: automatic retries and queued prompts may follow it.
         this.emit("settled");
-        if (event.aborted) { void this.stop(); return; }
+        if (this.rpc?.remote) {
+          // Only the owner decides completion; a settled parent can still have busy children.
+          this.phase = event.aborted ? "cancelled" : "waiting";
+          this.activity = this.waitingAnswer ? "awaiting answer" : this.children > 0 ? "awaiting children" : "settled";
+          break;
+        }
+        if (event.aborted) { void this.stop().catch((error) => this.emit("fault", String(error))); return; }
         if (this.waitingAnswer || this.children > 0) {
           this.phase = "waiting";
           this.activity = this.waitingAnswer ? "awaiting answer" : "awaiting children";
@@ -179,7 +205,7 @@ export class Subagent extends EventEmitter {
           this.finalizing = true;
           this.phase = this.error ? "failed" : "completed";
           // Preserve messages/session writes before reporting completion.
-          void this.rpc?.stop(false);
+          void this.rpc?.stop(false).catch((error) => this.fail(error));
         } else {
           this.phase = "waiting";
           this.activity = "ready for a message";
@@ -203,18 +229,21 @@ export class Subagent extends EventEmitter {
     this.phase = "cancelled";
     this.emit("settled"); // Restore the main screen immediately, even if shutdown takes time.
     this.changed();
-    await this.rpc?.stop();
+    try { await this.rpc?.stop(); }
+    catch (error) { this.emit("fault", String(error)); }
     this.finish();
   }
 
   async fail(error: unknown) {
     if (this.reported || this.cancelled) return;
     this.error = error instanceof Error ? error.message : String(error);
+    this.emit("fault", this.error);
     this.phase = "failed";
     this.finalizing = true;
     this.emit("settled");
     this.changed();
-    await this.rpc?.stop();
+    try { await this.rpc?.stop(); }
+    catch (failure) { this.emit("fault", String(failure)); }
     this.finish();
   }
 

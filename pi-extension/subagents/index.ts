@@ -12,10 +12,11 @@ import { INHERIT_TOKEN, THINKING_LEVELS, findAvailableModel, formatModelSource, 
 import { buildModelPickerItems, ModelPickerComponent, type ModelPickerItem, type ModelPickerModel } from "./model-picker.ts";
 import { PiRpc, type RpcRecord } from "./rpc.ts";
 import { Subagent } from "./runtime.ts";
-import { SubagentScreen, SubagentWidget } from "./view.ts";
+import { SubagentScreen, SubagentWidget, guardComponent, orderAgents, clean } from "./view.ts";
 import { buildTaskWithSkills } from "./prompts.ts";
 import { ChildDialog } from "./dialog.ts";
 import { SUBAGENT_SHORTCUT } from "./shortcuts.ts";
+import { RemoteConnection, TreeBridge, type TreePacket } from "./tree.ts";
 
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 const SPAWNING_TOOLS = ["subagent", "subagent_message", "subagents_list"];
@@ -88,18 +89,123 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
   let interval: ReturnType<typeof setInterval> | undefined;
   let dialogQueue = Promise.resolve();
   let dialogActive = false;
+  let dialogAgent: Subagent | undefined;
   let cancelDialog: (() => void) | undefined;
+  let pickerAbort: AbortController | undefined;
+  const reportedErrors = new Set<string>();
+  const byId = (id: string) => Array.from(agents.values()).find((a) => a.id === id);
+  let bridge = new TreeBridge(byId, observeTree, (error) => reportError(undefined, error));
+
+  function reportError(agent: Subagent | undefined, error: unknown) {
+    if (disposed) return;
+    const text = error instanceof Error ? error.message : String(error);
+    pickerAbort?.abort();
+    try { dismiss?.(); } catch { /* Continue restoring/reporting through the parent UI. */ }
+    try { cancelDialog?.(); } catch { /* A dead dialog must not block reporting. */ }
+    if (bridge.hasParent) { bridge.fault(agent, text); return; }
+    const key = `${agent?.id ?? "ui"}:${text}`;
+    if (reportedErrors.has(key) || (!agent && Array.from(reportedErrors).some((key) => key.endsWith(`:${text}`)))) return;
+    reportedErrors.add(key);
+    if (reportedErrors.size > 500) reportedErrors.delete(reportedErrors.values().next().value!);
+    try { pi.sendMessage({ customType: "subagent_error", content: `${agent ? `Subagent "${agent.name}"` : "Subagents"} error:\n\n${text}\n\nReturned to the main agent.`, display: true }, { triggerTurn: false, deliverAs: "steer" }); }
+    catch { try { ctx?.ui.notify(clean(text), "error"); } catch { console.error(text); } }
+  }
+
+  function sendToChat(agent: Subagent, message: Parameters<ExtensionAPI["sendMessage"]>[0]) {
+    try { pi.sendMessage(message, { triggerTurn: !agent.rpc?.remote, deliverAs: "steer" }); }
+    catch (error) { reportError(agent, error); }
+  }
+
+  async function withErrors<T>(agent: Subagent | undefined, action: () => Promise<T>): Promise<T> {
+    try { return await action(); }
+    catch (error) { reportError(agent, error); throw error; }
+  }
+
+  function descendants(parent: Subagent) {
+    return Array.from(agents.values()).filter((candidate) => {
+      const seen = new Set<string>();
+      let id = candidate.parentId;
+      while (id && !seen.has(id)) {
+        if (id === parent.id) return true;
+        seen.add(id);
+        id = byId(id)?.parentId;
+      }
+      return false;
+    });
+  }
+
+  function closeDescendantViews(parent: Subagent) {
+    if (!["completed", "cancelled", "failed"].includes(parent.phase)) return;
+    if (dialogAgent === parent) cancelDialog?.();
+    for (const child of descendants(parent)) {
+      if (!(child.rpc instanceof RemoteConnection) || child.rpc.exitConfirmed) continue;
+      if (!child.rpc.markClosing()) continue;
+      if (dialogAgent === child) cancelDialog?.();
+      child.phase = parent.phase === "cancelled" ? "cancelled" : "failed";
+      child.activity = "ancestor closing";
+      child.emit("settled");
+      child.changed();
+    }
+  }
+
+  function finishDescendants(parent: Subagent) {
+    for (const child of descendants(parent)) {
+      if (!(child.rpc instanceof RemoteConnection) || child.rpc.exitConfirmed) continue;
+      const cancelled = parent.phase === "cancelled";
+      const error = cancelled ? undefined : `Ancestor "${parent.name}" ${parent.phase} before "${child.name}" exited${parent.error ? `: ${parent.error}` : "."}`;
+      if (child.rpc.pid && child.rpc.pid !== process.pid) {
+        try { process.kill(child.rpc.pid); } catch (failure: any) { if (failure?.code !== "ESRCH") reportError(child, failure); }
+      }
+      child.rpc.end({ code: cancelled ? 0 : 1, phase: cancelled ? "cancelled" : "failed", error });
+      if (error) reportError(child, error);
+    }
+  }
+
+  function observeTree(owner: Subagent, packet: TreePacket) {
+    if (disposed || !ctx || !(owner.rpc instanceof PiRpc)) return;
+    const id = packet.route.at(-1)!;
+    if (packet.kind === "fault") { reportError(byId(id) ?? owner, packet.error || "Unknown nested subagent error"); return; }
+    if (packet.route.length < 2) throw new Error("Invalid descendant route");
+    if (packet.kind === "spawn") {
+      const parent = byId(packet.route.at(-2)!);
+      const node = packet.node;
+      if (!parent || !node || typeof node.name !== "string" || !node.name || /[/\\\x00-\x1f\x7f-\x9f]/.test(node.name) || typeof node.agent !== "string" || typeof node.task !== "string" || !isAbsolute(node.sessionFile) || (node.pid !== undefined && (!Number.isSafeInteger(node.pid) || node.pid <= 0 || node.pid === process.pid))) throw new Error("Invalid nested subagent announcement");
+      const name = `${parent.name}/${node.name}`;
+      const existing = agents.get(name);
+      if (existing && !existing.finishedAt && existing.rpc) throw new Error(`Nested subagent handle collision: ${name}`);
+      const connection = new RemoteConnection(owner.rpc, packet.route.slice(1), node.pid);
+      const agent = new Subagent(name, node.agent, node.task, node.sessionFile, node.autoExit, connection, id);
+      agent.parentId = parent.id;
+      agent.depth = parent.depth + 1;
+      agent.model = node.model;
+      agent.thinking = node.thinking;
+      attach(agent, ctx);
+      try { registerName(artifactDir(ctx), name, { sessionFile: node.sessionFile, sessionId: getSessionId(node.sessionFile) }); }
+      catch (error) { reportError(agent, error); }
+      if (!parent.live) { closeDescendantViews(parent); if (parent.finishedAt) finishDescendants(parent); }
+      return;
+    }
+    const agent = byId(id);
+    if (!agent || !(agent.rpc instanceof RemoteConnection) || agent.rpc.owner !== owner.rpc || agent.rpc.route.join("/") !== packet.route.slice(1).join("/")) throw new Error("Unknown nested subagent route");
+    if (packet.kind === "record" && packet.record && typeof packet.record.type === "string") agent.rpc.receive(packet.record);
+    else if (packet.kind === "closed" && packet.result && ["completed", "cancelled", "failed"].includes(packet.result.phase ?? "")) agent.rpc.end(packet.result);
+    else throw new Error("Invalid nested subagent event");
+  }
   const artifactDir = (context: ExtensionContext) => join(context.sessionManager.getSessionDir(), "artifacts", context.sessionManager.getSessionId());
-  const liveCount = () => Array.from(agents.values()).filter((a) => a.live).length;
+  const liveCount = () => Array.from(agents.values()).filter((a) => a.live && !a.rpc?.remote).length;
   const publishChildren = () => {
-    if (process.env.PI_SUBAGENT_ID && !disposed) pi.appendEntry("subagent_children", { count: liveCount() });
+    if (process.env.PI_SUBAGENT_ID && !disposed) {
+      try { pi.appendEntry("subagent_children", { count: liveCount() }); }
+      catch (error) { reportError(undefined, error); }
+    }
   };
 
   const updateWidget = () => {
     if (disposed || ctx?.mode !== "tui") return;
-    ctx.ui.setWidget("subagent-status", agents.size
-      ? () => new SubagentWidget(() => Array.from(agents.values()), (agent) => { void openView(agent).catch((e) => ctx?.ui.notify(String(e), "error")); })
-      : undefined);
+    try { ctx.ui.setWidget("subagent-status", agents.size
+      ? () => new SubagentWidget(() => Array.from(agents.values()), (agent) => { void openView(agent); }, (error) => reportError(undefined, error))
+      : undefined); }
+    catch (error) { reportError(undefined, error); }
   };
 
   async function openView(agent?: Subagent) {
@@ -108,15 +214,24 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
     opening = true;
     try {
       if (!agent) {
-        const items = Array.from(agents.values());
+        const items = orderAgents(Array.from(agents.values()));
         if (!items.length) { context.ui.notify("No subagents yet. Use /subagent <profile> <task>.", "info"); return; }
-        const name = await pickModelChoice(context, "Subagents — select to open", items.map((a) => ({ value: a.name, label: `${a.name} (${a.agent}) · ${a.phase}`, searchText: `${a.name} ${a.agent} ${a.phase}` })));
+        pickerAbort = new AbortController();
+        const name = await pickModelChoice(context, "Subagents — select to open", items.map((a) => ({ value: a.name, label: `${"  ".repeat(a.depth)}${a.depth ? "↳ " : ""}${a.name} (${a.agent}) · ${a.phase}`, searchText: `${a.name} ${a.agent} ${a.phase}` })), pickerAbort.signal, (error) => reportError(undefined, error));
+        pickerAbort = undefined;
         agent = name ? agents.get(name) : undefined;
       }
       if (!agent || disposed || context !== ctx) return;
       const selected = agent;
       await context.ui.custom<void>((tui, theme, _keys, done) => {
-        const close = () => { removeViewInput?.(); removeViewInput = undefined; screen = undefined; dismiss = undefined; done(); };
+        const close = () => {
+          const current = screen;
+          screen = undefined;
+          dismiss = undefined;
+          try { removeViewInput?.(); }
+          catch (error) { reportError(selected, error); }
+          finally { removeViewInput = undefined; current?.dispose(); done(); }
+        };
         screen = new SubagentScreen(tui, theme, selected, close);
         dismiss = () => screen?.close();
         // Consume exit/navigation keys before Pi's parent interrupt/exit handling.
@@ -129,8 +244,10 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
         });
         return screen;
       }, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", row: 0, col: 0, margin: 0 } });
-    } finally {
-      removeViewInput?.();
+    } catch (error) { reportError(agent, error); }
+    finally {
+      pickerAbort = undefined;
+      try { removeViewInput?.(); } catch (error) { reportError(agent, error); }
       removeViewInput = undefined;
       screen?.dispose();
       screen = undefined;
@@ -142,20 +259,28 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
   async function cleanup() {
     if (disposed) return;
     disposed = true;
-    dismiss?.();
-    cancelDialog?.();
+    pickerAbort?.abort();
+    try { dismiss?.(); } catch { /* UI teardown must never prevent process cleanup. */ }
+    try { cancelDialog?.(); } catch { /* Exit listeners will also release dialogs. */ }
     if (interval) clearInterval(interval);
-    ctx?.ui.setWidget("subagent-status", undefined);
-    await Promise.all(Array.from(agents.values()).filter((a) => a.rpc && !a.finishedAt).map((a) => a.stop()));
-    await dialogQueue;
+    try { ctx?.ui.setWidget("subagent-status", undefined); } catch { /* Parent UI is already closing. */ }
+    try {
+      await Promise.all(Array.from(agents.values()).filter((a) => a.rpc instanceof PiRpc && !a.finishedAt).map(async (a) => {
+        try { await a.stop(); } catch { if (a.rpc instanceof PiRpc) await a.rpc.stop(); }
+      }));
+      await dialogQueue;
+    } finally { await bridge.dispose(); }
   }
   (globalThis as any)[CLEANUP_KEY] = cleanup;
 
   pi.on("session_start", async (_event, context) => {
     if (ctx) await cleanup();
+    else await bridge.dispose();
     ctx = context;
     disposed = false;
     agents.clear();
+    reportedErrors.clear();
+    bridge = new TreeBridge(byId, observeTree, (error) => reportError(undefined, error));
     if (process.env.PI_SUBAGENT_ID && !process.env.PI_SUBAGENT_ALLOWED) {
       pi.setActiveTools(pi.getActiveTools().filter((name) => !SPAWNING_TOOLS.includes(name)));
     }
@@ -164,6 +289,7 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
       const loadout = readSubagentLoadout(entry.sessionFile);
       const agent = new Subagent(name, loadout?.agent ?? "subagent", "Saved session", entry.sessionFile, true);
       agent.phase = "completed";
+      agent.depth = name.split("/").length - 1;
       agent.activity = "saved session";
       agent.model = loadout?.model ?? undefined;
       agent.thinking = loadout?.thinking ?? undefined;
@@ -171,10 +297,11 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
         try {
           const entries = getActiveSessionEntries(entry.sessionFile);
           agent.loadMessages(entries.filter((e: any) => e.type === "message").map((e: any) => e.message));
-        } catch (error) { context.ui.notify(`Cannot read saved subagent "${name}": ${String(error)}`, "warning"); }
+        } catch (error) { reportError(agent, `Cannot read saved subagent "${name}": ${String(error)}`); }
       }
       agents.set(name, agent);
     }
+    for (const agent of agents.values()) agent.parentId = agents.get(agent.name.slice(0, agent.name.lastIndexOf("/")))?.id;
     updateWidget();
     if (context.mode === "tui") interval = setInterval(updateWidget, 1000);
   });
@@ -183,13 +310,19 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
   function attach(agent: Subagent, context: ExtensionContext) {
     agents.set(agent.name, agent);
     publishChildren();
-    agent.on("change", updateWidget);
-    agent.on("notice", (text, level) => { if (!disposed) context.ui.notify(text, level ?? "info"); });
+    bridge.connect(agent);
+    agent.on("change", () => { closeDescendantViews(agent); updateWidget(); });
+    agent.on("fault", (error) => reportError(agent, error));
+    agent.on("notice", (text, level) => {
+      if (disposed) return;
+      if (level === "error") reportError(agent, text);
+      else if (!bridge.hasParent) context.ui.notify(clean(String(text)), level ?? "info");
+    });
     agent.on("question", (question) => {
-      if (!disposed) pi.sendMessage({ customType: "subagent_question", content: `Subagent "${agent.name}" asks:\n\n${question}\n\nReply with subagent_message({ name: ${JSON.stringify(agent.name)}, message: "…" }).`, display: true }, { triggerTurn: true, deliverAs: "steer" });
+      if (!disposed) sendToChat(agent, { customType: "subagent_question", content: `Subagent "${agent.name}" asks:\n\n${question}\n\nReply with subagent_message({ name: ${JSON.stringify(agent.name)}, message: "…" }).`, display: true });
     });
     agent.onDialog = (record) => {
-      if (disposed || !agent.live) return;
+      if (disposed || !agent.live || bridge.hasParent) return;
       const deadline = record.timeout ? Date.now() + record.timeout : undefined;
       // Parallel children must not replace each other's dialogs in Pi's editor slot.
       dialogQueue = dialogQueue.then(async () => {
@@ -198,6 +331,7 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
         if (deadline && Date.now() >= deadline) return;
         dismiss?.();
         dialogActive = true;
+        dialogAgent = agent;
         const controller = new AbortController();
         const abort = () => controller.abort();
         agent.once("finished", abort);
@@ -209,7 +343,7 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
             response = await context.ui.custom<RpcRecord>((tui, theme, _keys, done) => {
               dialogComponent = new ChildDialog(tui, theme, agent, { ...record, timeout }, done, context);
               cancelDialog = () => dialogComponent?.cancel();
-              return dialogComponent;
+              return guardComponent(dialogComponent, (error) => { dialogComponent?.cancel(); reportError(agent, error); });
             });
           } else {
             cancelDialog = abort;
@@ -222,20 +356,30 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
             if ((response.value === undefined && record.method !== "confirm") || controller.signal.aborted) response.cancelled = true;
           }
           if (!disposed && agent.live && context === ctx) agent.rpc?.write(response);
-        } catch (error) { if (!disposed && context === ctx) context.ui.notify(String(error), "error"); }
-        finally { dialogComponent?.dispose(); agent.off("finished", abort); cancelDialog = undefined; dialogActive = false; }
-      }).catch((error) => { if (!disposed) context.ui.notify(String(error), "error"); });
+        } catch (error) {
+          if (!disposed && context === ctx) {
+            reportError(agent, error);
+            // A failed modal must also release the child waiting for its response.
+            try { if (agent.live) agent.rpc?.write({ type: "extension_ui_response", id: record.id, cancelled: true }); }
+            catch (failure) { reportError(agent, failure); }
+          }
+        }
+        finally { dialogComponent?.dispose(); agent.off("finished", abort); cancelDialog = undefined; dialogActive = false; dialogAgent = undefined; }
+      }).catch((error) => { if (!disposed) reportError(agent, error); });
     };
     agent.once("finished", () => {
+      finishDescendants(agent);
       agent.removeAllListeners("change");
       publishChildren();
       updateWidget();
       if (disposed) return;
       try { registerName(artifactDir(context), agent.name, { sessionFile: agent.sessionFile, sessionId: getSessionId(agent.sessionFile) }); }
-      catch (error) { context.ui.notify(`Could not update subagent registry: ${String(error)}`, "warning"); }
-      const stats = existsSync(agent.sessionFile) ? summarizeSessionStats(agent.sessionFile) : null;
-      pi.sendMessage({ customType: "subagent_result", content: `Subagent "${agent.name}" ${agent.phase} (${agent.elapsed}s).\n\n${agent.error ? `Error: ${agent.error}\n\n` : ""}${agent.summary}\n\nFollow up with subagent_message({ name: ${JSON.stringify(agent.name)}, message: "…" }).`, display: true,
-        details: { name: agent.name, agent: agent.agent, phase: agent.phase, sessionFile: agent.sessionFile, stats } }, { triggerTurn: true, deliverAs: "steer" });
+      catch (error) { reportError(agent, `Could not update subagent registry: ${String(error)}`); }
+      let stats = null;
+      try { stats = existsSync(agent.sessionFile) ? summarizeSessionStats(agent.sessionFile) : null; }
+      catch (error) { reportError(agent, error); }
+      sendToChat(agent, { customType: "subagent_result", content: `Subagent "${agent.name}" ${agent.phase} (${agent.elapsed}s).\n\n${agent.error ? `Error: ${agent.error}\n\n` : ""}${agent.summary}\n\nFollow up with subagent_message({ name: ${JSON.stringify(agent.name)}, message: "…" }).`, display: true,
+        details: { name: agent.name, agent: agent.agent, phase: agent.phase, sessionFile: agent.sessionFile, stats, parent: agent.parentId ? byId(agent.parentId)?.name : undefined } });
     });
     updateWidget();
   }
@@ -259,8 +403,10 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
     // An explicit empty grant distinguishes a leaf child from the unrestricted parent.
     env.PI_SUBAGENT_ALLOWED = loadout.spawnable?.join(",") ?? "";
     registerName(artifactDir(context), name, { sessionFile, sessionId: getSessionId(sessionFile) });
-    const rpc = (dependencies.createRpc ?? ((args, options) => new PiRpc(args, options)))(args, { cwd: loadout.cwd ?? context.cwd, env });
-    const agent = new Subagent(name, loadout.agent ?? "subagent", task, sessionFile, loadout.autoExit, rpc);
+    let rpc: PiRpc;
+    try { rpc = (dependencies.createRpc ?? ((args, options) => new PiRpc(args, options)))(args, { cwd: loadout.cwd ?? context.cwd, env }); }
+    catch (error) { throw new Error(`Could not start "${name}": ${String(error)}`); }
+    const agent = new Subagent(name, loadout.agent ?? "subagent", task, sessionFile, loadout.autoExit, rpc, env.PI_SUBAGENT_ID);
     agent.model = resolved.command ?? undefined;
     agent.thinking = resolved.thinking ?? undefined;
     attach(agent, context);
@@ -285,7 +431,7 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
     const registry = readNameRegistry(artifactDir(context));
     let name = params.name?.trim() || params.agent;
     if (params.name && (agents.has(name) || registry[name])) throw new Error(`Subagent name "${name}" is already taken. Use subagent_message to follow up.`);
-    if (["__proto__", "constructor", "prototype"].includes(name)) throw new Error("Reserved subagent name.");
+    if (["__proto__", "constructor", "prototype"].includes(name) || /[/\\\x00-\x1f\x7f-\x9f]/.test(name)) throw new Error("Reserved subagent name. Names cannot contain slashes or control characters.");
     if (!params.name) {
       let suffix = 2;
       while (agents.has(name) || registry[name]) name = `${params.agent}-${suffix++}`;
@@ -315,41 +461,47 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
 
   pi.registerTool({ name: "subagent", label: "Subagent", description: "Launch an isolated Pi subagent in the background. Results arrive automatically; do not poll. The user can open it inside the main tab.", parameters: SubagentParams,
     async execute(_id, params, _signal, _update, context) {
-      const agent = await spawnAgent(params, context);
-      return { content: [{ type: "text", text: `Started "${agent.name}" (${agent.agent}). Results will arrive automatically. Follow up using subagent_message with this name.` }], details: { name: agent.name, sessionFile: agent.sessionFile } };
+      return withErrors(undefined, async () => {
+        const agent = await spawnAgent(params, context);
+        return { content: [{ type: "text" as const, text: `Started "${agent.name}" (${agent.agent}). Results will arrive automatically. Follow up using subagent_message with this name.` }], details: { name: agent.name, sessionFile: agent.sessionFile } };
+      });
     } });
 
   pi.registerTool({ name: "subagent_message", label: "Message Subagent", description: "Send a message to a live subagent, or resume a finished subagent's saved session with its original profile and tools.", parameters: Type.Object({ name: Type.String(), message: Type.String() }),
     async execute(_id, params, _signal, _update, context) {
-      if (!params.message.trim()) throw new Error("Message must not be empty.");
-      const existing = agents.get(params.name);
-      if (existing?.live) await existing.send(params.message);
-      else {
-        if (existing?.rpc && !existing.finishedAt) throw new Error("Subagent is still closing. Wait for its result before resuming.");
-        const entry = readNameRegistry(artifactDir(context))[params.name];
-        if (!entry || !existsSync(entry.sessionFile)) throw new Error(`No saved subagent named "${params.name}".`);
-        const loadout = readSubagentLoadout(entry.sessionFile);
-        if (!loadout) throw new Error("Missing loadout snapshot; refusing an unrestricted resume.");
-        await launch(params.name, params.message, { ...loadout, autoExit: true }, entry.sessionFile, context);
-      }
-      return { content: [{ type: "text", text: `Message delivered to "${params.name}". Results arrive automatically.` }], details: { name: params.name } };
+      return withErrors(agents.get(params.name), async () => {
+        if (!params.message.trim()) throw new Error("Message must not be empty.");
+        const existing = agents.get(params.name);
+        if (existing?.live) await existing.send(params.message);
+        else {
+          if (existing?.rpc && !existing.finishedAt) throw new Error("Subagent is still closing. Wait for its result before resuming.");
+          const entry = readNameRegistry(artifactDir(context))[params.name];
+          if (!entry || !existsSync(entry.sessionFile)) throw new Error(`No saved subagent named "${params.name}".`);
+          const loadout = readSubagentLoadout(entry.sessionFile);
+          if (!loadout) throw new Error("Missing loadout snapshot; refusing an unrestricted resume.");
+          await launch(params.name, params.message, { ...loadout, autoExit: true }, entry.sessionFile, context);
+        }
+        return { content: [{ type: "text" as const, text: `Message delivered to "${params.name}". Results arrive automatically.` }], details: { name: params.name } };
+      });
     } });
 
   pi.registerTool({ name: "subagents_list", label: "List Subagents", description: "List available profiles and spawned agents. Not needed to poll for results.", parameters: Type.Object({}),
     async execute(_id, _params, _signal, _update, context) {
-      const config = loadSubagentConfig();
-      const catalog = buildModelCatalog(context);
-      const profiles = discoverAgentDefinitions().filter((a) => !a.disableModelInvocation).map((a) => {
-        const resolved = resolveSubagentModel({ agentName: a.name, agentModel: a.model ?? null, agentThinking: a.thinking ?? null, param: null, config, catalog });
-        return { name: a.name, description: a.description, model: a.model, tools: a.tools, effectiveModel: resolved.command, modelSource: resolved.source, modelLabel: `${resolved.command ?? "default"} · ${formatModelSource(resolved.source)}` };
+      return withErrors(undefined, async () => {
+        const config = loadSubagentConfig();
+        const catalog = buildModelCatalog(context);
+        const profiles = discoverAgentDefinitions().filter((a) => !a.disableModelInvocation).map((a) => {
+          const resolved = resolveSubagentModel({ agentName: a.name, agentModel: a.model ?? null, agentThinking: a.thinking ?? null, param: null, config, catalog });
+          return { name: a.name, description: a.description, model: a.model, tools: a.tools, effectiveModel: resolved.command, modelSource: resolved.source, modelLabel: `${resolved.command ?? "default"} · ${formatModelSource(resolved.source)}` };
+        });
+        const sessions = orderAgents(Array.from(agents.values())).map((a) => ({ name: a.name, agent: a.agent, phase: a.phase, activity: a.activity, parent: a.parentId ? byId(a.parentId)?.name : undefined }));
+        return { content: [{ type: "text" as const, text: JSON.stringify({ profiles, sessions }, null, 2) }], details: { agents: profiles, sessions } };
       });
-      const sessions = Array.from(agents.values()).map((a) => ({ name: a.name, agent: a.agent, phase: a.phase, activity: a.activity }));
-      return { content: [{ type: "text", text: JSON.stringify({ profiles, sessions }, null, 2) }], details: { agents: profiles, sessions } };
     } });
 
   pi.registerCommand("subagents", { description: "Select a subagent and open its in-tab conversation", handler: async (name, context) => {
     ctx = context;
-    if (name.trim() && !agents.has(name.trim())) { context.ui.notify(`Unknown subagent: ${name.trim()}`, "warning"); return; }
+    if (name.trim() && !agents.has(name.trim())) { reportError(undefined, `Unknown subagent: ${name.trim()}`); return; }
     await openView(agents.get(name.trim()));
   } });
   pi.registerShortcut(SUBAGENT_SHORTCUT, { description: "Open subagent conversations", handler: async (context) => { ctx = context; await openView(); } });
@@ -357,18 +509,18 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
     const [agent, ...rest] = args.trim().split(/\s+/);
     if (!agent) { context.ui.notify("Usage: /subagent <agent> <task>", "warning"); return; }
     try { await spawnAgent({ agent, task: rest.join(" ") || "Introduce yourself and wait for instructions." }, context, true); }
-    catch (error) { context.ui.notify(String(error), "error"); }
+    catch (error) { reportError(undefined, error); }
   } });
   pi.registerCommand("subagent-stop", { description: "Stop a subagent: /subagent-stop <name>", handler: async (name, context) => {
     const agent = agents.get(name.trim());
-    if (!agent?.live) { context.ui.notify("No live subagent with that name.", "warning"); return; }
-    await agent.stop();
+    if (!agent?.live) { reportError(agent, "No live subagent with that name."); return; }
+    try { await agent.stop(); } catch (error) { reportError(agent, error); }
   } });
 
-  for (const kind of ["subagent_result", "subagent_question"]) pi.registerMessageRenderer(kind, (message, options, theme) => {
-    const content = typeof message.content === "string" ? message.content : "";
+  for (const kind of ["subagent_result", "subagent_question", "subagent_error"]) pi.registerMessageRenderer(kind, (message, options, theme) => {
+    const content = typeof message.content === "string" ? clean(message.content) : "";
     const lines = options.expanded ? content : content.split("\n").slice(0, 6).join("\n");
-    return new Text(theme.fg("accent", kind === "subagent_result" ? "Subagent result\n" : "Subagent question\n") + lines, 1, 1);
+    return new Text(theme.fg(kind === "subagent_error" ? "error" : "accent", kind === "subagent_result" ? "Subagent result\n" : kind === "subagent_error" ? "Subagent error\n" : "Subagent question\n") + lines, 1, 1);
   });
 
   registerModelCommand(pi);
@@ -489,32 +641,42 @@ async function pickModelChoice(
   ctx: ModelSelectionContext,
   title: string,
   items: readonly ModelPickerItem[],
+  signal?: AbortSignal,
+  onError?: (error: unknown) => void,
 ): Promise<string | undefined> {
   if (ctx.mode !== undefined ? ctx.mode !== "tui" : !ctx.hasUI) {
-    const chosenLabel = await ctx.ui.select(`${title}:`, items.map((item) => item.label));
+    const chosenLabel = await ctx.ui.select(`${title}:`, items.map((item) => item.label), { signal });
     return items.find((item) => item.label === chosenLabel)?.value;
   }
 
   let unsubscribe: (() => void) | undefined;
+  let removeAbort: (() => void) | undefined;
   try {
     return await ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
-      const component = new ModelPickerComponent(theme, { title, items }, done);
+      let completed = false;
+      const finish = (value: string | undefined) => { if (completed) return; completed = true; done(value); };
+      const abort = () => finish(undefined);
+      if (signal?.aborted) queueMicrotask(abort);
+      else signal?.addEventListener("abort", abort, { once: true });
+      removeAbort = () => signal?.removeEventListener("abort", abort);
+      const component = new ModelPickerComponent(theme, { title, items }, finish);
       // Consume Ctrl+C before it can reach Pi's interrupt/exit handlers, even
       // when closing the dialog restores focus to the main editor immediately.
       unsubscribe = ctx.ui.onTerminalInput?.((data) => {
         if (matchesKey(data, Key.ctrl("c"))) {
-          done(undefined);
+          finish(undefined);
           return { consume: true };
         }
       });
       const handleInput = component.handleInput.bind(component);
       component.handleInput = (data: string) => {
-        handleInput(data);
-        tui.requestRender();
+        try { handleInput(data); tui.requestRender(); }
+        catch (error) { finish(undefined); if (onError) onError(error); else throw error; }
       };
-      return component;
+      return onError ? guardComponent(component, (error) => { finish(undefined); onError(error); }) : component;
     });
   } finally {
+    removeAbort?.();
     unsubscribe?.();
   }
 }

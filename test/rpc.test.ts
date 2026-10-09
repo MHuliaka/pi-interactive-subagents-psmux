@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 import { JsonlDecoder, PiRpc } from "../pi-extension/subagents/rpc.ts";
 import { Subagent } from "../pi-extension/subagents/runtime.ts";
+import { resolvePiLaunch } from "../pi-extension/subagents/launcher.ts";
 
 function harness() {
   const commands: any[] = [];
@@ -40,11 +41,13 @@ describe("RPC transport", () => {
     assert.deepEqual(records, [{ type: "message", text: "a\u2028b\u2029c" }, { type: "next" }]);
   });
 
-  it("launches pi without a shell and preserves raw paths", async () => {
+  it("launches the declared Pi CLI directly without a shell or PATH shim and preserves raw paths", async () => {
     const h = harness();
-    assert.deepEqual(h.launch.args, ["--mode", "rpc", "--session", "folder with spaces/test.jsonl"]);
-    assert.equal(h.launch.command, "pi");
+    const target = resolvePiLaunch();
+    assert.deepEqual(h.launch.args, [...target.prefix, "--mode", "rpc", "--session", "folder with spaces/test.jsonl"]);
+    assert.equal(h.launch.command, process.execPath);
     assert.equal(h.launch.options.shell, false);
+    assert.deepEqual(h.launch.options.stdio, ["pipe", "pipe", "pipe", "ipc"]);
     await h.rpc.prompt("first\nsecond");
     assert.equal(h.commands[0].message, "first\nsecond");
     assert.equal(h.commands[0].streamingBehavior, "steer");
@@ -87,6 +90,31 @@ describe("RPC transport", () => {
     h.child.emit("error", new Error("spawn pi ENOENT"));
     await assert.rejects(pending, /ENOENT/);
     assert.equal((await h.rpc.closed).code, 1);
+  });
+
+  it("routes nested controls through IPC and correlates replies", async () => {
+    const h = harness();
+    h.child.connected = true;
+    h.child.send = (packet: any, callback: any) => {
+      assert.deepEqual(packet.route, ["parent", "child"]);
+      assert.equal(packet.action, "prompt");
+      assert.equal(packet.message, "nested\nmessage");
+      queueMicrotask(() => h.child.emit("message", { channel: packet.channel, kind: "reply", id: packet.id, success: true, data: "accepted" }));
+      callback(null);
+      return true;
+    };
+    assert.equal(await h.rpc.treeRequest(["parent", "child"], "prompt", { message: "nested\nmessage" }), "accepted");
+    await h.rpc.stop(false);
+    await assert.rejects(h.rpc.treeRequest(["child"], "stop"), /closed/);
+  });
+
+  it("rejects IPC requests when the owner crashes", async () => {
+    const h = harness();
+    h.child.connected = true;
+    h.child.send = (_packet: any, callback: any) => { callback(null); return true; };
+    const pending = h.rpc.treeRequest(["child"], "stop");
+    h.child.emit("close", 2);
+    await assert.rejects(pending, /exited/);
   });
 
   it("bounds unresponsive shutdown with a kill fallback", async () => {

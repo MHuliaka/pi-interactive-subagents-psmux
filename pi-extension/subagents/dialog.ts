@@ -45,8 +45,7 @@ export class ChildDialog implements Component {
         },
       };
     }
-    this.agent.on("finished", this.cancelOnExit);
-    this.agent.on("settled", this.cancelOnStop);
+    this.cancel = () => respond({ cancelled: true });
     this.removeInput = context.ui.onTerminalInput((data) => {
       if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, "ctrl+d")) {
         respond({ cancelled: true });
@@ -54,16 +53,18 @@ export class ChildDialog implements Component {
       }
       return undefined;
     });
+    this.agent.on("finished", this.cancelOnExit);
+    this.agent.on("settled", this.cancelOnStop);
     if (record.timeout) this.timer = setTimeout(() => respond({ cancelled: true }), record.timeout);
-    this.cancel = () => respond({ cancelled: true });
   }
 
   cancel: () => void = () => {};
   private close(response: RpcRecord) {
     if (this.closed) return;
     this.closed = true;
-    this.dispose();
-    this.done(response);
+    try { this.dispose(); }
+    catch (error) { this.agent.emit("fault", `Child dialog: ${String(error)}`); }
+    finally { this.done(response); }
   }
   handleInput(data: string) {
     if (this.closed) return;
@@ -75,8 +76,10 @@ export class ChildDialog implements Component {
   invalidate() { this.child.invalidate(); }
   dispose() {
     if (this.timer) clearTimeout(this.timer);
-    this.removeInput?.();
-    this.agent.off("finished", this.cancelOnExit);
-    this.agent.off("settled", this.cancelOnStop);
+    try { this.removeInput?.(); }
+    finally {
+      this.agent.off("finished", this.cancelOnExit);
+      this.agent.off("settled", this.cancelOnStop);
+    }
   }
 }

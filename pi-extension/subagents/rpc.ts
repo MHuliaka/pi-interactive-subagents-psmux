@@ -1,8 +1,20 @@
-import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptions, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { resolvePiLaunch } from "./launcher.ts";
+
+export const TREE_CHANNEL = "pi-subagents/v1";
+export interface RpcExit { code: number; error?: string; phase?: "completed" | "cancelled" | "failed" }
+export interface AgentConnection extends EventEmitter {
+  readonly remote?: boolean;
+  readonly closed: Promise<RpcExit>;
+  prompt(message: string): Promise<any>;
+  write(record: RpcRecord): void;
+  stop(abort?: boolean): Promise<void>;
+}
 
 export type RpcRecord = Record<string, any>;
-export type SpawnProcess = (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
+export type SpawnProcess = (command: string, args: string[], options: SpawnOptions) => ChildProcessWithoutNullStreams;
+const spawnRpc: SpawnProcess = (command, args, options) => spawn(command, args, options) as ChildProcessWithoutNullStreams;
 
 /** LF-only framing: Unicode separators inside JSON strings are not record boundaries. */
 export class JsonlDecoder {
@@ -22,8 +34,8 @@ export class JsonlDecoder {
 /** One isolated Pi process. No shell, terminal emulator, polling, or sentinel files. */
 export class PiRpc extends EventEmitter {
   readonly process: ChildProcessWithoutNullStreams;
-  readonly closed: Promise<{ code: number; error?: string }>;
-  private resolveClosed!: (result: { code: number; error?: string }) => void;
+  readonly closed: Promise<RpcExit>;
+  private resolveClosed!: (result: RpcExit) => void;
   private sequence = 0;
   private ended = false;
   private stopping?: Promise<void>;
@@ -32,10 +44,22 @@ export class PiRpc extends EventEmitter {
   private forceKill?: ReturnType<typeof setTimeout>;
   private pending = new Map<string, { resolve: (data: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
 
-  constructor(args: string[], options: SpawnOptionsWithoutStdio, launch: SpawnProcess = spawn) {
+  constructor(args: string[], options: SpawnOptionsWithoutStdio, launch: SpawnProcess = spawnRpc) {
     super();
+    const target = resolvePiLaunch();
     this.closed = new Promise((resolve) => { this.resolveClosed = resolve; });
-    this.process = launch("pi", ["--mode", "rpc", ...args], { ...options, shell: false });
+    this.process = launch(target.command, [...target.prefix, "--mode", "rpc", ...args], { ...options, shell: false, stdio: ["pipe", "pipe", "pipe", "ipc"] });
+    this.process.on("message", (packet: any) => {
+      if (this.ended || packet?.channel !== TREE_CHANNEL) return;
+      if (packet.kind === "reply") {
+        const waiter = this.pending.get(packet.id);
+        if (!waiter) return;
+        this.pending.delete(packet.id);
+        clearTimeout(waiter.timer);
+        if (packet.success) waiter.resolve(packet.data);
+        else waiter.reject(new Error(packet.error || "Subagent routing failed"));
+      } else this.emit("tree", packet);
+    });
     const decoder = new JsonlDecoder((record) => this.receive(record));
     this.process.stdout.setEncoding("utf8");
     this.process.stderr.setEncoding("utf8");
@@ -75,6 +99,24 @@ export class PiRpc extends EventEmitter {
       this.pending.set(id, { resolve, reject, timer });
       try { this.write({ ...fields, id, type }); }
       catch (error) { this.pending.delete(id); clearTimeout(timer); reject(error); }
+    });
+  }
+
+  treeRequest(route: string[], action: string, fields: RpcRecord = {}, timeout = 10000): Promise<any> {
+    if (this.ended || !this.process.connected || !this.process.send) return Promise.reject(new Error("Subagent control channel is closed"));
+    const id = `tree-${++this.sequence}`;
+    return new Promise((resolve, reject) => {
+      const fail = (error: Error) => {
+        const waiter = this.pending.get(id);
+        if (!waiter) return;
+        this.pending.delete(id);
+        clearTimeout(waiter.timer);
+        reject(error);
+      };
+      const timer = setTimeout(() => fail(new Error(`Subagent ${action} routing timed out`)), timeout);
+      this.pending.set(id, { resolve, reject, timer });
+      try { this.process.send!({ channel: TREE_CHANNEL, kind: "command", id, route, action, ...fields }, (error: Error | null) => { if (error) fail(error); }); }
+      catch (error) { fail(error instanceof Error ? error : new Error(String(error))); }
     });
   }
 
