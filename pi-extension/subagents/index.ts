@@ -202,7 +202,7 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
 
   const updateWidget = () => {
     if (disposed || ctx?.mode !== "tui") return;
-    try { ctx.ui.setWidget("subagent-status", agents.size
+    try { ctx.ui.setWidget("subagent-status", Array.from(agents.values()).some((a) => a.live)
       ? () => new SubagentWidget(() => Array.from(agents.values()), (agent) => { void openView(agent); }, (error) => reportError(undefined, error))
       : undefined); }
     catch (error) { reportError(undefined, error); }

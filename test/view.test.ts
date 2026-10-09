@@ -7,10 +7,12 @@ import { initTheme } from "@earendil-works/pi-coding-agent";
 initTheme("dark", false);
 
 const theme: any = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
-function setup() {
+function setup(live = false) {
   const agent = new Subagent("仕事 😀", "worker", "A very long task", "session", true);
   let stopped = 0;
   agent.phase = "running";
+  agent.activity = "working";
+  if (live) Object.defineProperty(agent, "live", { get: () => !["completed", "cancelled", "failed"].includes(agent.phase) });
   (agent as any).stop = async () => { stopped++; agent.emit("settled"); };
   let closed = 0;
   let redraws = 0;
@@ -83,11 +85,12 @@ describe("in-tab view", () => {
 
   it("bounds the main widget to five rows and opens clicked agents", () => {
     const agents = Array.from({ length: 15 }, (_, i) => new Subagent(`worker-${i}`, "worker", "task", "s", true));
+    for (const agent of agents) Object.defineProperty(agent, "live", { get: () => !["completed", "cancelled", "failed"].includes(agent.phase) });
     let clicked: Subagent | undefined;
     const widget = new SubagentWidget(() => agents, (agent) => clicked = agent);
     const lines = widget.render(80);
     assert.equal(lines.length, 8);
-    assert.ok(lines.some((line) => line.includes("15 total")));
+    assert.ok(lines.some((line) => line.includes("15 active")));
     widget.handleMouse({ type: "click", button: "left", y: 1 } as any);
     assert.equal(clicked, agents[10]);
   });
@@ -119,6 +122,64 @@ describe("in-tab view", () => {
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(sent, "first line\nsecond line");
     h.screen.close();
+  });
+
+  it("animates a native loader even when no RPC events arrive, and disposes its timer", (t) => {
+    t.mock.timers.enable({ apis: ["setInterval"] });
+    const h = setup(true);
+    t.after(() => h.screen.close());
+    const first = h.screen.render(80).join("\n");
+    assert.ok(first.includes("Working…"));
+    const redraws = h.redraws();
+    t.mock.timers.tick(80);
+    assert.ok(h.redraws() > redraws);
+    assert.notEqual(h.screen.render(80).join("\n"), first);
+    h.agent.activity = "thinking";
+    h.agent.changed();
+    assert.ok(h.screen.render(80).some((line) => line.includes("Thinking…")));
+    h.screen.close();
+    const stopped = h.redraws();
+    t.mock.timers.tick(800);
+    assert.equal(h.redraws(), stopped);
+  });
+
+  it("animates child waiting, but stops loading while waiting for an answer or idle message", (t) => {
+    t.mock.timers.enable({ apis: ["setInterval"] });
+    const h = setup(true);
+    t.after(() => h.screen.close());
+    h.agent.phase = "waiting";
+    h.agent.activity = "awaiting children";
+    h.agent.changed();
+    assert.ok(h.screen.render(80).some((line) => line.includes("Waiting for child agents…")));
+    for (const activity of ["awaiting answer", "ready for a message"]) {
+      h.agent.activity = activity;
+      h.agent.changed();
+      const before = h.redraws();
+      t.mock.timers.tick(800);
+      assert.equal(h.redraws(), before);
+      assert.ok(!h.screen.render(80).some((line) => /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(line)));
+    }
+    h.agent.phase = "running";
+    h.agent.activity = "working";
+    h.agent.changed();
+    assert.ok(h.screen.render(80).some((line) => line.includes("Working…")));
+  });
+
+  it("cleans completed, cancelled, failed and saved agents out of the active widget", () => {
+    const agents = ["active", "completed", "cancelled", "failed", "saved"].map((name) => new Subagent(name, "worker", "task", "s", true));
+    Object.defineProperty(agents[0], "live", { get: () => agents[0].phase === "running" });
+    agents[0].phase = "running";
+    agents[1].phase = "completed";
+    agents[2].phase = "cancelled";
+    agents[3].phase = "failed";
+    agents[4].phase = "completed";
+    const widget = new SubagentWidget(() => agents, () => {});
+    const text = widget.render(100).join("\n");
+    assert.ok(text.includes("active (worker)"));
+    assert.ok(!/(completed|cancelled|failed|saved) \(worker\)/.test(text));
+    agents[0].phase = "completed";
+    assert.deepEqual(widget.render(100), []);
+    assert.equal(agents.length, 5, "widget cleanup must not delete saved conversations");
   });
 
   it("groups descendants below their parent despite concurrent arrival order", () => {

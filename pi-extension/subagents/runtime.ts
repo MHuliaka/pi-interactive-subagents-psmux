@@ -251,6 +251,7 @@ export class Subagent extends EventEmitter {
     if (this.reported) return;
     this.reported = true;
     this.finishedAt = Date.now();
+    this.activity = this.phase;
     this.removeRecord?.();
     this.emit("settled");
     this.changed();

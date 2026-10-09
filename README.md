@@ -17,13 +17,13 @@ If the package is already installed in Pi, update its checkout, install its depe
 
 ## Main tab and subagent views
 
-The main conversation has a blue **Subagents** block. It shows up to five recent agents so a large delegation doesn't fill the terminal. All agents are accessible through the selector.
+The main conversation has a blue **Subagents** block. It shows up to five recent active agents so a large delegation doesn't fill the terminal. Finished agents leave the block, and the block disappears when no agents remain active. Saved/finished conversations are still accessible through `/subagents` for inspection or follow-up.
 
 - Click a row in the block to open that agent in **fullscreen terminal mode**.
 - Use **Ctrl+Alt+G** or `/subagents` to select an agent with the keyboard.
 - Use `/subagents <name>` to open a particular agent directly.
 
-Opening an agent covers the terminal with its conversation, streaming response, thinking, tool arguments/results, usage, and message input. The main session remains active underneath, with its history and editor untouched. Other agents continue running.
+Opening an agent covers the terminal with its conversation, streaming response, thinking, tool arguments/results, usage, and message input. A native animated loader shows starting, working, thinking, tool execution, retries, compaction, or waiting for child agents—even between output events. It stops when waiting for your answer, idle, finished, or when you leave the view. The main session remains active underneath, with its history and editor untouched. Other agents continue running.
 
 The same blue border contains **← Return to main agent**.
 

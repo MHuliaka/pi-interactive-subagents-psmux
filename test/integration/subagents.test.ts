@@ -30,8 +30,9 @@ async function setup() {
   const launches: any[] = [];
   const processes: PiRpc[] = [];
   const packets: any[] = [];
+  const widgets = new Map<string, any>();
   const ui: any = {
-    notify() {}, setWidget() {}, onTerminalInput() { return () => {}; },
+    notify() {}, setWidget(key: string, factory: any) { if (factory) widgets.set(key, factory); else widgets.delete(key); }, onTerminalInput() { return () => {}; },
   };
   const ctx: any = {
     cwd: dir, mode: "rpc", hasUI: true, ui, model: { provider: "test", id: "parent", reasoning: true },
@@ -56,7 +57,7 @@ async function setup() {
   } });
   await events.get("session_start")({}, ctx);
   const execute = (name: string, params: any) => tools.get(name).execute("test", params, undefined, undefined, ctx);
-  return { ctx, execute, commands, events, processes, results, launches, packets, shutdown: () => events.get("session_shutdown")({}, ctx) };
+  return { ctx, execute, commands, events, processes, results, launches, packets, widgets, shutdown: () => events.get("session_shutdown")({}, ctx) };
 }
 async function waitFor(predicate: () => boolean) {
   const deadline = Date.now() + 5000;
@@ -370,5 +371,31 @@ it("an error dismisses an open selector exactly once and allows reopening a conv
     assert.equal(reopened.state.component.agent.name, "one");
     reopened.state.consume("\x1b");
     await reopened.done;
+  } finally { await h.shutdown(); }
+});
+
+it("removes finished agents from the main widget while retaining history and resume handles", async () => {
+  const h = await setup();
+  try {
+    h.ctx.mode = "tui";
+    await h.execute("subagent", { agent: "scout", name: "one", task: "HOLD" });
+    await h.execute("subagent", { agent: "scout", name: "two", task: "HOLD" });
+    assert.ok(h.widgets.has("subagent-status"));
+    await h.execute("subagent_message", { name: "one", message: "COMPLETE one" });
+    await waitFor(() => h.results.some((r) => r.details?.name === "one"));
+    const text = h.widgets.get("subagent-status")().render(100).join("\n");
+    assert.ok(!text.includes("one (scout)"));
+    assert.ok(text.includes("two (scout)"));
+    await h.execute("subagent_message", { name: "two", message: "COMPLETE two" });
+    await waitFor(() => h.results.some((r) => r.details?.name === "two"));
+    assert.equal(h.widgets.has("subagent-status"), false);
+    assert.equal((await h.execute("subagents_list", {})).details.sessions.length, 2);
+    const saved = view(h, "one");
+    assert.equal(saved.state.component.agent.activity, "completed");
+    assert.ok(saved.state.component.render(100).some((line: string) => line.includes("Done:")));
+    saved.state.consume("\x1b");
+    await saved.done;
+    await h.execute("subagent_message", { name: "one", message: "HOLD follow-up" });
+    assert.ok(h.widgets.has("subagent-status"), "resuming a saved agent must restore its active row");
   } finally { await h.shutdown(); }
 });
