@@ -160,6 +160,51 @@ describe("subagent lifecycle", () => {
     await agent.stop();
   });
 
+  it("keeps tool, retry, compaction and extension diagnostics local until a terminal outcome", async () => {
+    const h = harness();
+    const agent = new Subagent("worker", "worker", "task", "session", true, h.rpc);
+    const faults: string[] = [];
+    agent.on("fault", (error) => faults.push(error));
+    h.record({ type: "agent_start" });
+    h.record({ type: "tool_execution_start", toolCallId: "bad", toolName: "grep", args: { path: "missing" } });
+    h.record({ type: "tool_execution_end", toolCallId: "bad", isError: true, result: { content: [{ type: "text", text: "missing path" }] } });
+    h.record({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "temporary provider error" } });
+    h.record({ type: "auto_retry_start", attempt: 1, errorMessage: "temporary provider error" });
+    h.record({ type: "compaction_end", errorMessage: "temporary compaction error" });
+    h.record({ type: "extension_error", error: "recoverable extension failure" });
+    assert.deepEqual(faults, []);
+    assert.equal(agent.live, true);
+    h.record({ type: "auto_retry_end", success: true });
+    h.record({ type: "message_start", message: { role: "assistant", content: [] } });
+    h.record({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Recovered answer" }], stopReason: "stop" } });
+    h.record({ type: "agent_settled", aborted: false });
+    await h.rpc.closed;
+    await tick();
+    assert.equal(agent.phase, "completed");
+    assert.equal(agent.error, undefined);
+    assert.equal(agent.summary, "Recovered answer");
+    assert.deepEqual(faults, []);
+  });
+
+  it("waits until exhausted retries settle before reporting terminal failure", async () => {
+    const h = harness();
+    const agent = new Subagent("worker", "worker", "task", "session", true, h.rpc);
+    let finished = 0;
+    agent.on("finished", () => finished++);
+    h.record({ type: "agent_start" });
+    h.record({ type: "auto_retry_start", attempt: 1, errorMessage: "provider unavailable" });
+    h.record({ type: "auto_retry_end", success: false, finalError: "all retries exhausted" });
+    h.record({ type: "auto_retry_end", success: false }); // Missing diagnostics must not erase a pending failure.
+    assert.equal(agent.live, true);
+    assert.equal(finished, 0);
+    h.record({ type: "agent_settled", aborted: false });
+    await h.rpc.closed;
+    await tick();
+    assert.equal(agent.phase, "failed");
+    assert.equal(agent.error, "all retries exhausted");
+    assert.equal(finished, 1);
+  });
+
   it("keeps a questioning agent alive until the parent answers", async () => {
     const h = harness();
     const agent = new Subagent("worker", "worker", "task", "session", true, h.rpc);

@@ -52,7 +52,7 @@ const api = {
   sendMessage: (value) => {
     if (shuttingDown) return;
     message({ role: "custom", customType: value.customType, content: value.content });
-    if (value.customType === "subagent_result") setTimeout(() => {
+    if (value.customType === "subagent_result" || (value.customType === "subagent_error" && value.details?.phase === "failed")) setTimeout(() => {
       if (!shuttingDown) { send({ type: "agent_start" }); complete("Nested result received: " + value.content); }
     }, 20);
   },

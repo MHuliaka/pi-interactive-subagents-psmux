@@ -18,6 +18,29 @@ it("shows a compact blue result by default, including when main tools start expa
   assert.ok(card.render(80).join("\n").includes("Detailed result"));
 });
 
+it("shows gray question cards collapsed by default and expands the full question on click", () => {
+  const card = new SubagentResultCard('Subagent "scout" asks:\n\nWhich implementation should I use?\n\nReply with subagent_message.', false, "question");
+  const compact = card.render(80);
+  assert.equal(compact.length, 2);
+  assert.ok(compact.join("\n").includes("48;2;48;48;48"));
+  assert.ok(compact.join("\n").includes("asks"));
+  assert.ok(!compact.join("\n").includes("Reply with"));
+  card.handleMouse(click);
+  assert.ok(card.render(80).join("\n").includes("Reply with"));
+  card.handleMouse(click);
+  assert.equal(card.render(80).length, 2);
+});
+
+it("shows terminal failures in a blue frame with an Error heading inside", () => {
+  const card = new SubagentResultCard('Subagent "scout" failed (12s).\n\nProvider unavailable', false, "error");
+  const lines = card.render(80);
+  assert.ok(lines[1].includes("Error"));
+  assert.ok(lines.join("\n").includes("Provider unavailable"));
+  assert.ok(lines.join("\n").includes("38;2;77;163;255"));
+  card.handleMouse(click);
+  assert.equal(card.render(80).length, 3);
+});
+
 it("clicks expand and collapse the entire result, not a truncated preview", () => {
   const card = new SubagentResultCard(content);
   card.render(80);
@@ -30,10 +53,10 @@ it("clicks expand and collapse the entire result, not a truncated preview", () =
   assert.equal(card.render(80).length, 3);
 });
 
-it("registers only result cards and preserves their state through native message rebuilds", () => {
+it("registers result/error cards and preserves their state through native message rebuilds", () => {
   let renderer: any;
   registerResultRenderer({ registerMessageRenderer: (kind: string, callback: any) => {
-    assert.equal(kind, "subagent_result"); renderer = callback;
+    assert.ok(["subagent_result", "subagent_error", "subagent_question"].includes(kind)); renderer = callback;
   } } as any);
   const message: any = { role: "custom", customType: "subagent_result", content, display: true };
   const native = new CustomMessageComponent(message, renderer);

@@ -28,6 +28,13 @@ it("loads the extension in the real Pi RPC runtime and shuts down cleanly withou
     assert.ok(commands.some((c: any) => c.name === "subagents"), "extension must load successfully through Pi's loader");
     assert.ok(commands.some((c: any) => c.name === "subagent-model"));
     assert.deepEqual(errors, []);
+    const before = await rpc.request("get_messages");
+    const uiEntries: any[] = [];
+    rpc.on("record", (record) => { if (record.type === "entry_appended" && record.entry?.customType === "subagent_ui") uiEntries.push(record.entry); });
+    await rpc.prompt("/subagents nonexistent-context-audit");
+    assert.equal(uiEntries.length, 1);
+    assert.ok(uiEntries[0].data.content.includes("Unknown subagent"));
+    assert.deepEqual(await rpc.request("get_messages"), before, "UI errors must not change real Pi model messages");
     const dialog = new Promise<void>((resolve) => {
       const onRecord = (record: any) => {
         if (record.type === "extension_ui_request" && record.method === "confirm") { rpc.off("record", onRecord); resolve(); }

@@ -17,8 +17,9 @@ import { buildTaskWithSkills } from "./prompts.ts";
 import { ChildDialog } from "./dialog.ts";
 import { SUBAGENT_SHORTCUT } from "./shortcuts.ts";
 import { RemoteConnection, TreeBridge, type TreePacket } from "./tree.ts";
-import { nativePresentation, nativeKeybindings, prepareNativeRenderers } from "./native-context.ts";
+import { nativePresentation, nativeKeybindings, prepareNativeRenderers, pinWidgetFirst } from "./native-context.ts";
 import { registerResultRenderer } from "./result.ts";
+import { filterContext, filterSummaryEntries } from "./context-policy.ts";
 
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 const SPAWNING_TOOLS = ["subagent", "subagent_message", "subagents_list"];
@@ -81,6 +82,13 @@ const CLEANUP_KEY = Symbol.for("pi-subagents/rpc-cleanup");
 
 export default function subagentsExtension(pi: ExtensionAPI, dependencies: { createRpc?: (args: string[], options: SpawnOptionsWithoutStdio) => PiRpc } = {}) {
   registerResultRenderer(pi);
+  pi.on("context", (event) => ({ messages: filterContext(event.messages) }));
+  pi.on("session_before_compact", (event) => {
+    event.preparation.messagesToSummarize = filterContext(event.preparation.messagesToSummarize);
+    event.preparation.turnPrefixMessages = filterContext(event.preparation.turnPrefixMessages);
+    filterSummaryEntries(event.branchEntries);
+  });
+  pi.on("session_before_tree", (event) => { filterSummaryEntries(event.preparation.entriesToSummarize); });
   latestPi = pi;
   const agents = new Map<string, Subagent>();
   let ctx: ExtensionContext | undefined;
@@ -90,6 +98,8 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
   let dismiss: (() => void) | undefined;
   let removeViewInput: (() => void) | undefined;
   let interval: ReturnType<typeof setInterval> | undefined;
+  let widgetActive = false;
+  let redrawWidget: (() => void) | undefined;
   let dialogQueue = Promise.resolve();
   let dialogActive = false;
   let dialogAgent: Subagent | undefined;
@@ -110,12 +120,17 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
     if (reportedErrors.has(key) || (!agent && Array.from(reportedErrors).some((key) => key.endsWith(`:${text}`)))) return;
     reportedErrors.add(key);
     if (reportedErrors.size > 500) reportedErrors.delete(reportedErrors.values().next().value!);
-    try { pi.sendMessage({ customType: "subagent_error", content: `${agent ? `Subagent "${agent.name}"` : "Subagents"} error:\n\n${text}\n\nReturned to the main agent.`, display: true }, { triggerTurn: false, deliverAs: "steer" }); }
+    try { pi.appendEntry("subagent_ui", { customType: "subagent_error", content: `${agent ? `Subagent "${agent.name}"` : "Subagents"} error:\n\n${text}\n\nReturned to the main agent.` }); }
     catch { try { ctx?.ui.notify(clean(text), "error"); } catch { console.error(text); } }
   }
 
   function sendToChat(agent: Subagent, message: Parameters<ExtensionAPI["sendMessage"]>[0]) {
-    try { pi.sendMessage(message, { triggerTurn: !agent.rpc?.remote, deliverAs: "steer" }); }
+    try {
+      if (agent.rpc?.remote) {
+        // The real owner already receives this. Root only observes the descendant.
+        pi.appendEntry("subagent_ui", message);
+      } else pi.sendMessage(message, { triggerTurn: true, deliverAs: "steer" });
+    }
     catch (error) { reportError(agent, error); }
   }
 
@@ -160,7 +175,6 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
         try { process.kill(child.rpc.pid); } catch (failure: any) { if (failure?.code !== "ESRCH") reportError(child, failure); }
       }
       child.rpc.end({ code: cancelled ? 0 : 1, phase: cancelled ? "cancelled" : "failed", error });
-      if (error) reportError(child, error);
     }
   }
 
@@ -205,10 +219,21 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
 
   const updateWidget = () => {
     if (disposed || ctx?.mode !== "tui") return;
-    try { ctx.ui.setWidget("subagent-status", Array.from(agents.values()).some((a) => a.live)
-      ? () => new SubagentWidget(() => Array.from(agents.values()), (agent) => { void openView(agent); }, (error) => reportError(undefined, error))
-      : undefined); }
-    catch (error) { reportError(undefined, error); }
+    try {
+      const live = Array.from(agents.values()).some((a) => a.live);
+      if (live && !widgetActive) {
+        ctx.ui.setWidget("subagent-status", (tui) => {
+          redrawWidget = () => tui.requestRender();
+          return new SubagentWidget(() => Array.from(agents.values()), (agent) => { void openView(agent); }, (error) => reportError(undefined, error));
+        }, { placement: "aboveEditor" });
+        widgetActive = true;
+        pinWidgetFirst(ctx, "subagent-status");
+      } else if (!live && widgetActive) {
+        ctx.ui.setWidget("subagent-status", undefined);
+        widgetActive = false;
+        redrawWidget = undefined;
+      } else if (live) redrawWidget?.();
+    } catch (error) { reportError(undefined, error); }
   };
 
   async function openView(agent?: Subagent) {
@@ -267,6 +292,8 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
     try { cancelDialog?.(); } catch { /* Exit listeners will also release dialogs. */ }
     if (interval) clearInterval(interval);
     try { ctx?.ui.setWidget("subagent-status", undefined); } catch { /* Parent UI is already closing. */ }
+    widgetActive = false;
+    redrawWidget = undefined;
     try {
       await Promise.all(Array.from(agents.values()).filter((a) => a.rpc instanceof PiRpc && !a.finishedAt).map(async (a) => {
         try { await a.stop(); } catch { if (a.rpc instanceof PiRpc) await a.rpc.stop(); }
@@ -324,11 +351,13 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
     });
     agent.on("notice", (text, level) => {
       if (disposed) return;
-      if (level === "error") reportError(agent, text);
-      else if (!bridge.hasParent) context.ui.notify(clean(String(text)), level ?? "info");
+      // Extension notifications are child diagnostics, not orchestrator failures.
+      if (level === "error") return;
+      if (!bridge.hasParent) context.ui.notify(clean(String(text)), level ?? "info");
     });
     agent.on("question", (question) => {
-      if (!disposed) sendToChat(agent, { customType: "subagent_question", content: `Subagent "${agent.name}" asks:\n\n${question}\n\nReply with subagent_message({ name: ${JSON.stringify(agent.name)}, message: "…" }).`, display: true });
+      if (!disposed) sendToChat(agent, { customType: "subagent_question", content: `Subagent "${agent.name}" asks:\n\n${question}\n\nReply with subagent_message({ name: ${JSON.stringify(agent.name)}, message: "…" }).`, display: true,
+        details: { name: agent.name, delivery: agent.rpc?.remote ? "observer" : "owner" } });
     });
     agent.onDialog = (record) => {
       if (disposed || !agent.live || bridge.hasParent) return;
@@ -387,8 +416,11 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
       let stats = null;
       try { stats = existsSync(agent.sessionFile) ? summarizeSessionStats(agent.sessionFile) : null; }
       catch (error) { reportError(agent, error); }
-      sendToChat(agent, { customType: "subagent_result", content: `Subagent "${agent.name}" ${agent.phase} (${agent.elapsed}s).\n\n${agent.error ? `Error: ${agent.error}\n\n` : ""}${agent.summary}\n\nFollow up with subagent_message({ name: ${JSON.stringify(agent.name)}, message: "…" }).`, display: true,
-        details: { name: agent.name, agent: agent.agent, phase: agent.phase, sessionFile: agent.sessionFile, stats, parent: agent.parentId ? byId(agent.parentId)?.name : undefined } });
+      if (agent.phase === "failed") reportedErrors.add(`${agent.id}:${agent.error ?? agent.summary}`);
+      sendToChat(agent, { customType: agent.phase === "failed" ? "subagent_error" : "subagent_result", content: agent.phase === "failed"
+        ? `Subagent "${agent.name}" failed (${agent.elapsed}s).\n\n${agent.error ?? agent.summary}`
+        : `Subagent "${agent.name}" ${agent.phase} (${agent.elapsed}s).\n\n${agent.summary}\n\nFollow up with subagent_message({ name: ${JSON.stringify(agent.name)}, message: "…" }).`, display: true,
+        details: { name: agent.name, agent: agent.agent, delivery: agent.rpc?.remote ? "observer" : "owner", phase: agent.phase, sessionFile: agent.sessionFile, stats, parent: agent.parentId ? byId(agent.parentId)?.name : undefined } });
     });
     updateWidget();
   }

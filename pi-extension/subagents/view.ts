@@ -3,7 +3,7 @@ import { Loader, ScrollView, matchesKey, truncateToWidth, visibleWidth, type Com
 import { Subagent } from "./runtime.ts";
 import { nativePresentation, nativeKeybindings, type NativePresentation } from "./native-context.ts";
 import { NativeTranscript } from "./native-transcript.ts";
-import { SUBAGENT_SHORTCUT, SUBAGENT_SHORTCUT_HINT } from "./shortcuts.ts";
+import { SUBAGENT_SHORTCUT } from "./shortcuts.ts";
 
 const BLUE = "\x1b[38;2;77;163;255m";
 const RESET = "\x1b[0m";
@@ -35,6 +35,34 @@ export function orderAgents(agents: Subagent[]): Subagent[] {
   for (const agent of agents) visit(agent);
   return result;
 }
+/** Align existing row fields without changing arrows, nesting or separators. */
+export function formatAgentRows(agents: Subagent[], width: number): string[] {
+  if (!agents.length) return [];
+  const cells = agents.map((a) => [
+    ` ${"  ".repeat(a.depth)}${a.depth ? "↳" : "›"} ${clean(a.name)}`,
+    `(${clean(a.agent)})`, a.phase, clean(a.activity), `${a.elapsed}s`,
+  ]);
+  const sizes = Array.from({ length: 5 }, (_, column) => Math.max(...cells.map((row) => visibleWidth(row[column]))));
+  const separators = [" ", " · ", " · ", " · "];
+  let overflow = sizes.reduce((sum, size) => sum + size, 0) + 10 - Math.max(0, width);
+  const prefixWidth = Math.max(...agents.map((a) => 3 + a.depth * 2));
+  // Shorten names/activity before sacrificing status or elapsed time. Preserve
+  // hierarchy prefixes whenever the terminal can fit the five-column layout.
+  for (const [column, minimum] of [[0, prefixWidth + 6], [3, 6], [1, 4], [0, prefixWidth + 1], [2, 1], [4, 1]]) {
+    if (overflow <= 0) break;
+    const reduction = Math.min(overflow, Math.max(0, sizes[column] - minimum));
+    sizes[column] -= reduction; overflow -= reduction;
+  }
+  return cells.map((row) => {
+    const columns = row.map((cell, column) => {
+      const text = column === 1 && visibleWidth(cell) > sizes[column]
+        ? `(${truncateToWidth(cell.slice(1, -1), Math.max(0, sizes[column] - 2))})`
+        : truncateToWidth(cell, sizes[column], column === 0 ? "..." : "…");
+      return text + " ".repeat(Math.max(0, sizes[column] - visibleWidth(text)));
+    });
+    return truncateToWidth(columns.map((column, i) => column + (separators[i] ?? "")).join(""), Math.max(0, width), "");
+  });
+}
 export function guardComponent<T extends Component>(component: T, onError: (error: unknown) => void): T {
   for (const method of ["render", "handleInput", "handleMouse", "invalidate"] as const) {
     const original = (component as any)[method];
@@ -57,9 +85,8 @@ export class SubagentWidget implements Component {
       const agents = orderAgents(this.agents()).filter((a) => a.live);
       this.shown = agents.slice(-5);
       if (!agents.length) return [];
-      const rows = this.shown.map((a) => ` ${"  ".repeat(a.depth)}${a.depth ? "↳" : "›"} ${clean(a.name)} (${clean(a.agent)}) · ${a.phase} · ${clean(a.activity)} · ${a.elapsed}s`);
-      rows.push(` /subagents · ${SUBAGENT_SHORTCUT_HINT} · ${agents.length} active${agents.length > 5 ? " (last 5 shown)" : ""}`);
-      return blueBox(`Subagents · ${agents.length} active`, rows, width);
+      const rows = formatAgentRows(this.shown, Math.max(0, width - 2));
+      return [...blueBox(`Subagents · ${agents.length} active`, rows, width), ""];
     } catch (error) { this.onError(error); return []; }
   }
   handleMouse(event: TuiMouseEvent) {

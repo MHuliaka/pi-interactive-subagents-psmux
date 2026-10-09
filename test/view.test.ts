@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { SubagentScreen, SubagentWidget, blueBox, orderAgents, guardComponent } from "../pi-extension/subagents/view.ts";
+import { SubagentScreen, SubagentWidget, blueBox, orderAgents, guardComponent, formatAgentRows } from "../pi-extension/subagents/view.ts";
 import { Subagent } from "../pi-extension/subagents/runtime.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { initTheme, CustomEditor } from "@earendil-works/pi-coding-agent";
@@ -84,6 +84,34 @@ describe("in-tab view", () => {
     h.screen.handleMouse({ type: "click", button: "left", y: row } as any);
     assert.equal(h.closed(), 1);
     assert.equal(h.stopped(), 0);
+  });
+
+  it("aligns profile/status/activity/time columns while preserving hierarchy prefixes", () => {
+    const agents = [new Subagent("short", "worker", "task", "s", true), new Subagent("parent/仕事 😀", "scout", "task", "s", true)];
+    agents[1].depth = 1;
+    agents[0].phase = "running"; agents[1].phase = "waiting";
+    agents[0].activity = "thinking"; agents[1].activity = "working";
+    const rows = formatAgentRows(agents, 100);
+    assert.ok(rows[0].startsWith(" › short"));
+    assert.ok(rows[1].startsWith("   ↳ parent/仕事 😀"));
+    const positions = rows.map((row) => [
+      visibleWidth(row.slice(0, row.indexOf("("))),
+      ...[...row.matchAll(/ · /g)].map((match) => visibleWidth(row.slice(0, match.index))),
+    ]);
+    assert.deepEqual(positions[0], positions[1]);
+    assert.equal((rows[0].match(/ · /g) ?? []).length, 3, "no new separators");
+  });
+
+  it("truncates long names with three dots without pushing other columns", () => {
+    const agents = [new Subagent("an-extremely-long-agent-name-".repeat(4), "worker", "task", "s", true), new Subagent("short", "scout", "task", "s", true)];
+    for (const agent of agents) { agent.phase = "running"; agent.activity = "thinking"; }
+    const rows = formatAgentRows(agents, 60);
+    assert.ok(rows[0].includes("..."));
+    assert.ok(rows[0].includes("(worker)"));
+    assert.ok(rows[0].includes("running"));
+    assert.ok(rows[0].includes("thinking"));
+    assert.equal(visibleWidth(rows[0].slice(0, rows[0].indexOf("("))), visibleWidth(rows[1].slice(0, rows[1].indexOf("("))));
+    for (const width of [0, 1, 3, 10, 30, 60]) for (const row of formatAgentRows(agents, width)) assert.ok(visibleWidth(row) <= width);
   });
 
   it("bounds the main widget to five rows and opens clicked agents", () => {

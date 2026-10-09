@@ -60,7 +60,6 @@ export class Subagent extends EventEmitter {
           this.error = error || (code !== 0 ? `Pi exited with code ${code}` : "Subagent exited before completing its task");
           this.phase = "failed";
         }
-        if (this.error) this.emit("fault", this.error);
         this.finish();
       });
     }
@@ -156,7 +155,8 @@ export class Subagent extends EventEmitter {
         if (event.message?.role === "toolResult") break;
         if (this.activeMessage >= 0) this.messages[this.activeMessage] = event.message;
         if (event.message?.model) this.model = event.message.provider ? `${event.message.provider}/${event.message.model}` : event.message.model;
-        if (event.message?.errorMessage) { this.error = event.message.errorMessage; this.emit("fault", this.error); }
+        if (event.message?.errorMessage) this.error = event.message.errorMessage;
+        else if (event.message?.role === "assistant" && event.message.stopReason === "error") this.error = "Subagent failed without a response.";
         else if (event.message?.role === "assistant" && event.message.stopReason !== "error") this.error = undefined;
         this.activeMessage = -1;
         break;
@@ -173,18 +173,16 @@ export class Subagent extends EventEmitter {
       case "tool_execution_end": {
         const tool = this.tools.get(event.toolCallId);
         if (tool) { tool.result = event.result; tool.state = event.isError ? "failed" : "completed"; tool.durationMs = event.durationMs; }
-        if (event.isError) this.emit("fault", `${tool?.name ?? "Tool"} failed: ${(event.result?.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n") || "Unknown tool error"}`);
         break;
       }
       case "auto_retry_start":
-        if (event.errorMessage) this.emit("fault", event.errorMessage);
         this.activity = `retry ${event.attempt}`;
         break;
-      case "auto_retry_end": if (!event.success) { this.error = event.finalError; if (this.error) this.emit("fault", this.error); } break;
+      case "auto_retry_end": this.error = event.success ? undefined : event.finalError ?? this.error ?? "Subagent exhausted all retries without a response."; break;
       case "compaction_start": this.activity = "compacting"; break;
       case "compaction_end":
         if (event.result) this.messages.push({ role: "compactionSummary", summary: event.result.summary, usage: event.result.usage });
-        else if (event.errorMessage) { this.messages.push({ role: "custom", customType: "Compaction error", content: event.errorMessage }); this.emit("fault", event.errorMessage); }
+        else if (event.errorMessage) this.messages.push({ role: "custom", customType: "Compaction error", content: event.errorMessage, display: true });
         break;
       case "thinking_level_changed": this.thinking = event.level; break;
       case "entry_appended": {
@@ -201,7 +199,9 @@ export class Subagent extends EventEmitter {
         if (["select", "confirm", "input", "editor"].includes(event.method)) this.onDialog?.(event);
         else if (event.method === "notify") this.emit("notice", event.message, event.notifyType);
         break;
-      case "extension_error": this.emit("fault", event.error || "Unknown extension error"); break;
+      case "extension_error":
+        this.messages.push({ role: "custom", customType: "Extension error", content: event.error || "Unknown extension error", display: true });
+        break;
       case "agent_settled":
         // agent_end is NOT final: automatic retries and queued prompts may follow it.
         this.emit("settled");
@@ -239,6 +239,7 @@ export class Subagent extends EventEmitter {
     if (this.reported || !this.rpc) return;
     if (this.finalizing) { await this.rpc?.closed; return; }
     this.cancelled = true;
+    this.error = undefined;
     this.finalizing = true;
     this.phase = "cancelled";
     this.emit("settled"); // Restore the main screen immediately, even if shutdown takes time.
@@ -251,7 +252,6 @@ export class Subagent extends EventEmitter {
   async fail(error: unknown) {
     if (this.reported || this.cancelled) return;
     this.error = error instanceof Error ? error.message : String(error);
-    this.emit("fault", this.error);
     this.phase = "failed";
     this.finalizing = true;
     this.emit("settled");

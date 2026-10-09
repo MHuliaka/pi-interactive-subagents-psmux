@@ -27,6 +27,7 @@ async function setup() {
   const tools = new Map<string, any>();
   const commands = new Map<string, any>();
   const results: any[] = [];
+  const entries: any[] = [];
   const launches: any[] = [];
   const processes: PiRpc[] = [];
   const packets: any[] = [];
@@ -44,7 +45,7 @@ async function setup() {
     on: (name: string, handler: any) => events.set(name, handler),
     registerTool: (tool: any) => tools.set(tool.name, tool),
     registerCommand: (name: string, command: any) => commands.set(name, command),
-    registerShortcut() {}, registerMessageRenderer() {}, appendEntry() {},
+    registerShortcut() {}, registerMessageRenderer() {}, registerEntryRenderer() {}, appendEntry(customType: string, data: any) { entries.push({ customType, data }); },
     getThinkingLevel: () => "medium",
     sendMessage: (message: any) => results.push(message),
   };
@@ -57,8 +58,28 @@ async function setup() {
   } });
   await events.get("session_start")({}, ctx);
   const execute = (name: string, params: any) => tools.get(name).execute("test", params, undefined, undefined, ctx);
-  return { ctx, execute, commands, events, processes, results, launches, packets, widgets, shutdown: () => events.get("session_shutdown")({}, ctx) };
+  return { ctx, execute, commands, events, processes, results, entries, launches, packets, widgets, shutdown: () => events.get("session_shutdown")({}, ctx) };
 }
+it("excludes legacy internal diagnostics from orchestrator context but retains terminal failures", async () => {
+  const h = await setup();
+  try {
+    const legacy = { role: "custom", customType: "subagent_error", content: "grep failed: missing path" };
+    const failed = { role: "custom", customType: "subagent_error", content: "Child exited", details: { phase: "failed" } };
+    const answer = { role: "assistant", content: [{ type: "text", text: "Keep this response" }] };
+    const result = await h.events.get("context")({ messages: [legacy, failed, answer] }, h.ctx);
+    assert.deepEqual(result.messages, [failed, answer]);
+    const preparation = { messagesToSummarize: [legacy, failed, answer], turnPrefixMessages: [legacy, answer] };
+    const branchEntries = [{ type: "custom_message", customType: "subagent_error", content: legacy.content }];
+    await h.events.get("session_before_compact")({ preparation, branchEntries }, h.ctx);
+    assert.deepEqual(preparation.messagesToSummarize, [failed, answer]);
+    assert.deepEqual(preparation.turnPrefixMessages, [answer]);
+    assert.deepEqual(branchEntries, []);
+    const tree = { entriesToSummarize: [{ type: "custom_message", customType: "subagent_error", content: legacy.content }] };
+    await h.events.get("session_before_tree")({ preparation: tree }, h.ctx);
+    assert.deepEqual(tree.entriesToSummarize, []);
+  } finally { await h.shutdown(); }
+});
+
 async function waitFor(predicate: () => boolean) {
   const deadline = Date.now() + 5000;
   while (!predicate()) {
@@ -116,6 +137,8 @@ it("question flow stays alive, reply completes, and crash restores the selected 
     assert.equal(consume, undefined);
     await waitFor(() => h.results.some((r) => r.details?.name === "crasher"));
     assert.equal(h.results.find((r) => r.details?.name === "crasher").details.phase, "failed");
+    assert.equal(h.results.filter((r) => r.details?.name === "crasher").length, 1);
+    assert.equal(h.results.find((r) => r.details?.name === "crasher").customType, "subagent_error");
   } finally { await h.shutdown(); }
 });
 
@@ -177,7 +200,9 @@ it("opens a grandchild in the root tab, routes messages to it, and delivers comp
     assert.equal(v.state.returned, 1);
     assert.equal(v.state.consume, undefined);
     await waitSessions(h, (s) => s.every((a) => a.phase === "completed"));
-    assert.ok(h.results.some((r) => r.details?.name === "one/leaf" && r.details?.parent === "one"));
+    assert.ok(h.entries.some((r) => r.data?.details?.name === "one/leaf" && r.data?.details?.parent === "one"));
+    assert.ok(!h.results.some((r) => r.details?.name === "one/leaf"), "descendant results must not enter root model context");
+    await waitFor(() => h.results.some((r) => r.details?.name === "one"));
     assert.ok(h.results.find((r) => r.details?.name === "one").content.includes("root follow-up"));
     assert.equal(h.results.filter((r) => r.customType === "subagent_error").length, 0);
   } finally { await h.shutdown(); }
@@ -259,17 +284,38 @@ it("ancestor crash restores main, reports the error in chat and terminates the o
   } finally { await h.shutdown(); }
 });
 
-it("nested tool errors return to main with a chat error, without killing unrelated work", async () => {
+it("shows descendant questions to the user without duplicating them in root model context", async () => {
+  const h = await setup();
+  try {
+    await h.execute("subagent", { agent: "branch", name: "one", task: "NESTED HOLD" });
+    await waitSessions(h, (s) => s.some((a) => a.name === "one/leaf" && a.phase === "running"));
+    await h.execute("subagent_message", { name: "one/leaf", message: "ASK which file" });
+    await waitFor(() => h.entries.some((e) => e.data?.customType === "subagent_question"));
+    assert.ok(!h.results.some((r) => r.customType === "subagent_question"));
+    const notification = h.entries.find((e) => e.data?.customType === "subagent_question").data;
+    assert.equal(notification.details.delivery, "observer");
+    assert.equal(notification.details.name, "one/leaf");
+  } finally { await h.shutdown(); }
+});
+
+it("nested tool errors stay in the child without closing its view or entering orchestrator chat",  async () => {
   const h = await setup();
   try {
     await h.execute("subagent", { agent: "branch", name: "one", task: "NESTED HOLD" });
     await waitSessions(h, (s) => s.some((a) => a.name === "one/leaf" && a.phase === "running"));
     const v = view(h, "one/leaf");
     await h.execute("subagent_message", { name: "one/leaf", message: "TOOL_ERROR" });
-    await v.done;
-    assert.equal(v.state.returned, 1);
-    assert.ok(h.results.some((r) => r.customType === "subagent_error" && r.content.includes("one/leaf") && r.content.includes("fixture missing file")));
+    await waitFor(() => v.state.component.agent.tools.get("bad")?.state === "failed");
+    assert.equal(v.state.returned, 0);
+    assert.equal(h.results.filter((r) => r.customType === "subagent_error").length, 0);
+    assert.ok(v.state.component.agent.tools.get("bad").result.content[0].text.includes("fixture missing file"));
     assert.equal((await h.execute("subagents_list", {})).details.sessions.find((a: any) => a.name === "one/leaf").phase, "running", "recoverable tool errors do not cancel the agent");
+    await h.execute("subagent_message", { name: "one/leaf", message: "COMPLETE recovered" });
+    await v.done;
+    await waitFor(() => h.entries.some((r) => r.data?.customType === "subagent_result" && r.data.details.name === "one/leaf"));
+    assert.equal(v.state.returned, 1);
+    assert.equal(h.results.filter((r) => r.customType === "subagent_error").length, 0);
+    assert.ok(!h.results.some((r) => r.content.includes("fixture missing file")));
   } finally { await h.shutdown(); }
 });
 
@@ -282,7 +328,8 @@ it("malformed conversation rendering falls back to main and posts a visible chat
     assert.deepEqual(v.state.component.render(100), []);
     await v.done;
     assert.equal(v.state.returned, 1);
-    assert.ok(h.results.some((r) => r.customType === "subagent_error" && r.content.includes("Subagent view")));
+    assert.ok(h.entries.some((r) => r.data?.customType === "subagent_error" && r.data.content.includes("Subagent view")));
+    assert.equal(h.results.length, 0);
   } finally { await h.shutdown(); }
 });
 
@@ -294,7 +341,8 @@ it("launch/validation errors also dismiss an unrelated subagent view and appear 
     await assert.rejects(h.execute("subagent", { agent: "does-not-exist", task: "test" }), /Unknown or disallowed/);
     await v.done;
     assert.equal(v.state.returned, 1);
-    assert.ok(h.results.some((r) => r.customType === "subagent_error" && r.content.includes("does-not-exist")));
+    assert.ok(h.entries.some((r) => r.data?.customType === "subagent_error" && r.data.content.includes("does-not-exist")));
+    assert.equal(h.results.length, 0);
   } finally { await h.shutdown(); }
 });
 
@@ -335,7 +383,7 @@ it("crashing an intermediate ancestor closes the deepest view and cleans its bra
     await v.done;
     assert.equal(v.state.returned, 1);
     await waitSessions(h, (s) => s.find((a) => a.name === "one/middle/leaf")?.phase === "failed");
-    assert.ok(h.results.some((r) => r.customType === "subagent_error" && r.content.includes("one/middle")));
+    assert.ok(h.entries.some((r) => r.data?.customType === "subagent_error" && r.data.content.includes("one/middle")));
     await new Promise((resolve) => setTimeout(resolve, 350));
     const heartbeat = readFileSync(leaf.sessionFile + ".heartbeat", "utf8");
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -354,7 +402,7 @@ it("unexpected modal creation failure reports an error and releases the waiting 
     await v.done;
     await waitSessions(h, (s) => s.every((a) => a.phase === "completed"));
     assert.equal(v.state.returned, 1);
-    assert.ok(h.results.some((r) => r.customType === "subagent_error" && r.content.includes("unexpected modal failure")));
+    assert.ok(h.entries.some((r) => r.data?.customType === "subagent_error" && r.data.content.includes("unexpected modal failure")));
   } finally { await h.shutdown(); }
 });
 
@@ -374,6 +422,34 @@ it("an error dismisses an open selector exactly once and allows reopening a conv
   } finally { await h.shutdown(); }
 });
 
+it("keeps the subagent widget stable above observation progress throughout streaming updates", async () => {
+  const h = await setup();
+  try {
+    h.ctx.mode = "tui";
+    const observation = () => ({ render: () => ["Creating observations…"], invalidate() {} });
+    h.widgets.set("observations", observation);
+    const bridge = (globalThis as any)[Symbol.for("pi-subagents/native-presentation")];
+    bridge.frontends.set(h.ctx.sessionManager, { extensionWidgetsAbove: h.widgets, renderWidgets() {} });
+    let registrations = 0;
+    const setWidget = h.ctx.ui.setWidget;
+    h.ctx.ui.setWidget = (key: string, content: any) => { if (key === "subagent-status" && content) registrations++; setWidget(key, content); };
+    await h.execute("subagent", { agent: "scout", name: "one", task: "HOLD" });
+    const factory = h.widgets.get("subagent-status");
+    let renders = 0;
+    const widget = factory({ requestRender() { renders++; } });
+    await h.execute("subagent_message", { name: "one", message: "TOOL_ERROR" });
+    await waitFor(() => renders > 0);
+    assert.equal(registrations, 1);
+    assert.equal(h.widgets.get("subagent-status"), factory);
+    assert.deepEqual([...h.widgets.keys()], ["subagent-status", "observations"]);
+    const lines = widget.render(100);
+    assert.equal(lines.at(-1), "", "reserve a separator below the blue frame");
+    assert.ok(!lines.join("\n").includes("/subagents"));
+    assert.ok(!lines.join("\n").includes("Ctrl+Alt+G"));
+    assert.equal(h.widgets.get("observations"), observation);
+  } finally { await h.shutdown(); }
+});
+
 it("removes finished agents from the main widget while retaining history and resume handles", async () => {
   const h = await setup();
   try {
@@ -383,7 +459,7 @@ it("removes finished agents from the main widget while retaining history and res
     assert.ok(h.widgets.has("subagent-status"));
     await h.execute("subagent_message", { name: "one", message: "COMPLETE one" });
     await waitFor(() => h.results.some((r) => r.details?.name === "one"));
-    const text = h.widgets.get("subagent-status")().render(100).join("\n");
+    const text = h.widgets.get("subagent-status")({ requestRender() {} }).render(100).join("\n");
     assert.ok(!text.includes("one (scout)"));
     assert.ok(text.includes("two (scout)"));
     await h.execute("subagent_message", { name: "two", message: "COMPLETE two" });

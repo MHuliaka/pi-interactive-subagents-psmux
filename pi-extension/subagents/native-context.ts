@@ -29,6 +29,20 @@ if (!bridge.hooked.has(frontendPrototype)) {
   }
 }
 
+/** Pi 1.1 has no widget priority option. Keep our stable widget before other
+ * above-editor widgets without disposing or recreating their components. */
+export function pinWidgetFirst(context: ExtensionContext, key: string) {
+  const frontend = bridge.frontends.get(context.sessionManager);
+  const widgets: Map<string, any> | undefined = frontend?.extensionWidgetsAbove;
+  if (!widgets?.has(key) || widgets.keys().next().value === key) return;
+  const first = widgets.get(key);
+  const others = [...widgets].filter(([name]) => name !== key);
+  widgets.clear();
+  widgets.set(key, first);
+  for (const [name, component] of others) widgets.set(name, component);
+  frontend.renderWidgets();
+}
+
 let builtinRenderers: Record<string, ToolRenderers> = {};
 let Keybindings: any;
 let CustomEntry: any;
