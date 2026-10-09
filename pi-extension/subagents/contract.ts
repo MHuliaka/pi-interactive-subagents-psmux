@@ -72,3 +72,4 @@ export function taskPresentation(task: string, body: string | undefined, systemP
   const roleBlock = body && !systemPromptMode ? `\n\n${body}` : "";
   return `${roleBlock}\n\n${modeHint}\n\n${task}\n\n${summaryInstruction}`;
 }
+/

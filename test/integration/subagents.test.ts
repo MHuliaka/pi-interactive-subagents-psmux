@@ -356,7 +356,7 @@ it("malformed conversation rendering falls back to main and posts a visible chat
   } finally { await h.shutdown(); }
 });
 
-it("launch/validation errors also dismiss an unrelated subagent view and appear in main chat", async () => {
+it("tool validation uses ordinary tool output without extra cards or dismissing a child view", async () => {
   const h = await setup();
   try {
     await h.execute("subagent", { agent: "scout", name: "one", task: "HOLD" });
@@ -364,10 +364,14 @@ it("launch/validation errors also dismiss an unrelated subagent view and appear 
     const rejected = await h.execute("subagent", { agent: "does-not-exist", task: "test" });
     assert.equal(rejected.details.error, "unknown agent");
     assert.match(rejected.content[0].text, /You may not spawn the "does-not-exist" agent/);
-    await v.done;
-    assert.equal(v.state.returned, 1);
-    assert.ok(h.entries.some((r) => r.data?.customType === "subagent_error" && r.data.content.includes("does-not-exist")));
+    assert.equal(v.state.returned, 0);
+    assert.equal(h.entries.length, 0);
     assert.equal(h.results.length, 0);
+    await assert.rejects(h.execute("subagent", { agent: "scout", name: "one", task: "HOLD" }), /already taken/);
+    assert.equal(h.entries.length, 0, "name conflicts must not create a duplicate error card");
+    assert.equal(v.state.returned, 0);
+    v.state.consume("\x1b");
+    await v.done;
   } finally { await h.shutdown(); }
 });
 
@@ -431,13 +435,16 @@ it("unexpected modal creation failure reports an error and releases the waiting 
   } finally { await h.shutdown(); }
 });
 
-it("an error dismisses an open selector exactly once and allows reopening a conversation", async () => {
+it("tool validation leaves an open selector alone and adds no custom main-chat error", async () => {
   const h = await setup();
   try {
     await h.execute("subagent", { agent: "scout", name: "one", task: "HOLD" });
     const picker = view(h, "");
     const rejected = await h.execute("subagent", { agent: "invalid-profile", task: "test" });
     assert.equal(rejected.details.error, "unknown agent");
+    assert.equal(picker.state.returned, 0);
+    assert.equal(h.entries.length, 0);
+    picker.state.component.handleInput("\x1b");
     await picker.done;
     assert.equal(picker.state.returned, 1);
     assert.equal(picker.state.consume, undefined);

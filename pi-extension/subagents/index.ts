@@ -139,11 +139,6 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
     catch (error) { reportError(agent, error); }
   }
 
-  async function withErrors<T>(agent: Subagent | undefined, action: () => Promise<T>): Promise<T> {
-    try { return await action(); }
-    catch (error) { reportError(agent, error); throw error; }
-  }
-
   function descendants(parent: Subagent) {
     return Array.from(agents.values()).filter((candidate) => {
       const seen = new Set<string>();
@@ -533,7 +528,7 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
 
   pi.registerTool({ name: "subagent", label: "Subagent", description: SPAWN_DESCRIPTION, promptSnippet: SPAWN_DESCRIPTION, parameters: SubagentParams,
     async execute(_id, params, _signal, _update, context) {
-      return withErrors(undefined, async () => {
+      // Tool output/errors belong to Pi's normal tool renderer, not UI cards.
         const currentAgent = process.env.PI_SUBAGENT_AGENT;
         if (currentAgent && params.agent === currentAgent) return {
           content: [{ type: "text" as const, text: `You are the ${currentAgent} agent — do not start another ${currentAgent}. You were spawned to do this work yourself. Complete the task directly.` }],
@@ -545,18 +540,15 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
           const list = permitted.join(", ") || "(none)";
           const text = !params.agent ? `You must specify which agent to spawn via the "agent" field. Available agents: ${list}.`
             : `You may not spawn the "${params.agent}" agent — it is not ${process.env.PI_SUBAGENT_ALLOWED !== undefined ? "in your allowlist" : "a known agent"}. Available agents: ${list}.`;
-          reportError(undefined, text);
           return { content: [{ type: "text" as const, text }], details: { error: rejected } };
         }
         if (!context.sessionManager.getSessionFile()) return { content: [{ type: "text" as const, text: "Error: no session file. Start pi with a persistent session to use subagents." }], details: { error: "no session file" } };
         const agent = await spawnAgent(params, context);
         return { content: [{ type: "text" as const, text: spawnAcknowledgement(agent.name) }], details: { id: agent.id, name: agent.name, task: params.task, agent: agent.agent, sessionFile: agent.sessionFile } };
-      });
     } });
 
   pi.registerTool({ name: "subagent_message", label: "Message Subagent", description: MESSAGE_DESCRIPTION, promptSnippet: MESSAGE_SNIPPET, parameters: Type.Object({ name: Type.String({ description: "Exact display name of the subagent. Steers it if it is still running; resumes its session if it has finished." }), message: Type.String({ description: "The message to deliver: a follow-up instruction for a running subagent, or the next task for a resumed session." }) }),
     async execute(_id, params, _signal, _update, context) {
-      return withErrors(agents.get(params.name), async () => {
         const name = params.name?.trim();
         const failure = (text: string) => ({ content: [{ type: "text" as const, text }], details: { error: text } });
         if (!name) return failure("Provide the subagent's `name` to steer (if running) or resume (if finished).");
@@ -578,12 +570,10 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
           const resumed = await launch(name, params.message, { ...loadout, autoExit: true }, entry.sessionFile, context, undefined, resolved);
           return { content: [{ type: "text" as const, text: resumeAcknowledgement(name) }], details: { id: resumed.id, name, sessionId: entry.sessionId ?? getSessionId(entry.sessionFile) ?? name, sessionFile: entry.sessionFile, status: "started" } };
         }
-      });
     } });
 
   pi.registerTool({ name: "subagents_list", label: "List Subagents", description: LIST_DESCRIPTION, promptSnippet: LIST_DESCRIPTION, parameters: Type.Object({}),
     async execute(_id, _params, _signal, _update, context) {
-      return withErrors(undefined, async () => {
         const config = loadSubagentConfig();
         const catalog = buildModelCatalog(context);
         const profiles = discoverAgentDefinitions().filter((a) => !a.disableModelInvocation).map((a) => {
@@ -598,7 +588,6 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
         const unknown = Object.keys(config.models?.agents ?? {}).filter((name) => !known.has(name)).sort();
         if (unknown.length) lines.push(`Warning: models.agents names with no matching agent: ${unknown.join(", ")}`);
         return { content: [{ type: "text" as const, text: lines.join("\n") }], details: { agents: profiles, sessions } };
-      });
     } });
 
   pi.registerCommand("subagents", { description: "Select a subagent and open its in-tab conversation", handler: async (name, context) => {
