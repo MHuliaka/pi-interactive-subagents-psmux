@@ -1,6 +1,6 @@
 {
   "name": "pi-interactive-subagents",
-  "version": "4.1.1",
+  "version": "4.2.0",
   "description": "Cross-platform Pi RPC subagents with switchable conversations inside the main terminal tab",
   "keywords": [
     "pi-package"

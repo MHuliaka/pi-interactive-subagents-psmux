@@ -3,8 +3,11 @@ import assert from "node:assert/strict";
 import { SubagentScreen, SubagentWidget, blueBox, orderAgents, guardComponent } from "../pi-extension/subagents/view.ts";
 import { Subagent } from "../pi-extension/subagents/runtime.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { initTheme } from "@earendil-works/pi-coding-agent";
+import { initTheme, CustomEditor } from "@earendil-works/pi-coding-agent";
+import { nativePresentation } from "../pi-extension/subagents/native-context.ts";
 initTheme("dark", false);
+const { prepareNativeRenderers } = await import("../pi-extension/subagents/native-context.ts");
+await prepareNativeRenderers();
 
 const theme: any = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 function setup(live = false) {
@@ -107,9 +110,28 @@ describe("in-tab view", () => {
       assert.ok(lines.every((line) => visibleWidth(line) <= width));
     }
     const text = h.screen.render(80).join("\n");
-    assert.ok(text.includes("Updated"));
+    assert.ok(text.includes("edit"));
     assert.ok(text.includes("+new line"));
+    assert.ok(!text.includes('"diff"'), "native tools must not dump result details as JSON");
     h.screen.close();
+  });
+
+  it("uses the active extension's custom editor factory without replacing the main editor", () => {
+    const agent = new Subagent("styled", "worker", "task", "saved", true);
+    agent.draft = "child draft";
+    let factories = 0;
+    const presentation = { ...nativePresentation(), editorFactory: () => (tui: any, editorTheme: any, keys: any) => {
+      factories++;
+      const editor = new CustomEditor(tui, editorTheme, keys);
+      const render = editor.render.bind(editor);
+      editor.render = (width) => ["EXTENSION EDITOR", ...render(width)];
+      return editor;
+    } };
+    const screen = new SubagentScreen({ terminal: { rows: 24 }, requestRender() {} } as any, theme, agent, () => {}, presentation);
+    assert.ok(screen.render(100).join("\n").includes("EXTENSION EDITOR"));
+    assert.equal(factories, 1);
+    screen.close();
+    assert.equal(agent.draft, "child draft");
   });
 
   it("sends multiline pasted input only to the selected child", async () => {

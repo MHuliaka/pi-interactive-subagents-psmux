@@ -1,6 +1,6 @@
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { Key, matchesKey, Text } from "@earendil-works/pi-tui";
+import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -17,6 +17,7 @@ import { buildTaskWithSkills } from "./prompts.ts";
 import { ChildDialog } from "./dialog.ts";
 import { SUBAGENT_SHORTCUT } from "./shortcuts.ts";
 import { RemoteConnection, TreeBridge, type TreePacket } from "./tree.ts";
+import { nativePresentation, nativeKeybindings, prepareNativeRenderers } from "./native-context.ts";
 
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 const SPAWNING_TOOLS = ["subagent", "subagent_message", "subagents_list"];
@@ -232,7 +233,7 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
           catch (error) { reportError(selected, error); }
           finally { removeViewInput = undefined; current?.dispose(); done(); }
         };
-        screen = new SubagentScreen(tui, theme, selected, close);
+        screen = new SubagentScreen(tui, theme, selected, close, nativePresentation(pi, context), typeof (_keys as any).matches === "function" ? _keys : nativeKeybindings(), readSubagentLoadout(selected.sessionFile)?.cwd ?? context.cwd);
         dismiss = () => screen?.close();
         // Consume exit/navigation keys before Pi's parent interrupt/exit handling.
         removeViewInput = context.ui.onTerminalInput((data) => {
@@ -274,6 +275,7 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
   (globalThis as any)[CLEANUP_KEY] = cleanup;
 
   pi.on("session_start", async (_event, context) => {
+    await prepareNativeRenderers();
     if (ctx) await cleanup();
     else await bridge.dispose();
     ctx = context;
@@ -297,6 +299,7 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
         try {
           const entries = getActiveSessionEntries(entry.sessionFile);
           agent.loadMessages(entries.filter((e: any) => e.type === "message").map((e: any) => e.message));
+          agent.loadEntries(entries);
         } catch (error) { reportError(agent, `Cannot read saved subagent "${name}": ${String(error)}`); }
       }
       agents.set(name, agent);
@@ -313,6 +316,10 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
     bridge.connect(agent);
     agent.on("change", () => { closeDescendantViews(agent); updateWidget(); });
     agent.on("fault", (error) => reportError(agent, error));
+    agent.on("history", () => {
+      try { if (existsSync(agent.sessionFile)) agent.loadEntries(getActiveSessionEntries(agent.sessionFile)); }
+      catch (error) { reportError(agent, error); }
+    });
     agent.on("notice", (text, level) => {
       if (disposed) return;
       if (level === "error") reportError(agent, text);
@@ -415,6 +422,7 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
       await rpc.request("get_state");
       const history = await rpc.request("get_messages");
       agent.loadMessages(history?.messages ?? []);
+      agent.loadEntries(getActiveSessionEntries(sessionFile));
       agent.model = resolved.command ?? agent.model;
       // Read the CHILD's resource catalogue (its cwd/config may differ from ours).
       const commands = skills?.trim() ? (await rpc.request("get_commands"))?.commands ?? [] : [];
@@ -516,12 +524,6 @@ export default function subagentsExtension(pi: ExtensionAPI, dependencies: { cre
     if (!agent?.live) { reportError(agent, "No live subagent with that name."); return; }
     try { await agent.stop(); } catch (error) { reportError(agent, error); }
   } });
-
-  for (const kind of ["subagent_result", "subagent_question", "subagent_error"]) pi.registerMessageRenderer(kind, (message, options, theme) => {
-    const content = typeof message.content === "string" ? clean(message.content) : "";
-    const lines = options.expanded ? content : content.split("\n").slice(0, 6).join("\n");
-    return new Text(theme.fg(kind === "subagent_error" ? "error" : "accent", kind === "subagent_result" ? "Subagent result\n" : kind === "subagent_error" ? "Subagent error\n" : "Subagent question\n") + lines, 1, 1);
-  });
 
   registerModelCommand(pi);
 }

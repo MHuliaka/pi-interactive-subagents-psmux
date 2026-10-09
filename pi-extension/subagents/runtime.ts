@@ -9,6 +9,7 @@ export interface ToolActivity {
   args: any;
   result?: any;
   state: "running" | "completed" | "failed";
+  durationMs?: number;
 }
 
 /** Presentation and lifecycle state, independent of the parent terminal. */
@@ -66,6 +67,7 @@ export class Subagent extends EventEmitter {
   }
 
   get live() { return !!this.rpc && !this.finishedAt && !["completed", "cancelled", "failed"].includes(this.phase); }
+  get streamingMessageIndex() { return this.activeMessage; }
   get elapsed() { return Math.floor(((this.finishedAt ?? Date.now()) - this.startedAt) / 1000); }
   get summary(): string {
     for (let i = this.messages.length - 1; i >= 0; i--) {
@@ -97,6 +99,16 @@ export class Subagent extends EventEmitter {
     this.changed();
   }
 
+  loadEntries(entries: any[]) {
+    for (const entry of entries) {
+      if (entry.type !== "custom" || entry.customType?.startsWith("subagent_")) continue;
+      const time = Date.parse(entry.timestamp);
+      const index = this.messages.findIndex((message) => typeof message.timestamp === "number" && message.timestamp > time);
+      this.messages.splice(index < 0 ? this.messages.length : index, 0, { role: "customEntry", entry });
+    }
+    this.changed();
+  }
+
   changed() { this.revision++; this.emit("change"); }
 
   receive(event: RpcRecord) {
@@ -108,7 +120,7 @@ export class Subagent extends EventEmitter {
     if (this.finalizing || this.cancelled) return;
     switch (event.type) {
       case "response":
-        if (this.rpc?.remote && event.command === "get_messages" && event.success) this.loadMessages(event.data?.messages ?? []);
+        if (this.rpc?.remote && event.command === "get_messages" && event.success) { this.loadMessages(event.data?.messages ?? []); this.emit("history"); }
         break;
       case "agent_start": this.phase = "running"; this.activity = "working"; break;
       case "message_start":
@@ -146,9 +158,11 @@ export class Subagent extends EventEmitter {
         if (event.message?.model) this.model = event.message.provider ? `${event.message.provider}/${event.message.model}` : event.message.model;
         if (event.message?.errorMessage) { this.error = event.message.errorMessage; this.emit("fault", this.error); }
         else if (event.message?.role === "assistant" && event.message.stopReason !== "error") this.error = undefined;
+        this.activeMessage = -1;
         break;
       case "tool_execution_start":
         this.tools.set(event.toolCallId, { id: event.toolCallId, name: event.toolName, args: event.args, state: "running" });
+        if (!this.messages.some((m) => m.role === "assistant" && Array.isArray(m.content) && m.content.some((b: any) => b.type === "toolCall" && b.id === event.toolCallId))) this.messages.push({ role: "toolExecution", toolCallId: event.toolCallId });
         this.activity = event.toolName;
         break;
       case "tool_execution_update": {
@@ -158,14 +172,13 @@ export class Subagent extends EventEmitter {
       }
       case "tool_execution_end": {
         const tool = this.tools.get(event.toolCallId);
-        if (tool) { tool.result = event.result; tool.state = event.isError ? "failed" : "completed"; }
+        if (tool) { tool.result = event.result; tool.state = event.isError ? "failed" : "completed"; tool.durationMs = event.durationMs; }
         if (event.isError) this.emit("fault", `${tool?.name ?? "Tool"} failed: ${(event.result?.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n") || "Unknown tool error"}`);
         break;
       }
       case "auto_retry_start":
         if (event.errorMessage) this.emit("fault", event.errorMessage);
         this.activity = `retry ${event.attempt}`;
-        this.messages.push({ role: "custom", customType: "Retry", content: `Attempt ${event.attempt}/${event.maxAttempts ?? "?"}: ${event.errorMessage ?? "retrying"}` });
         break;
       case "auto_retry_end": if (!event.success) { this.error = event.finalError; if (this.error) this.emit("fault", this.error); } break;
       case "compaction_start": this.activity = "compacting"; break;
@@ -177,6 +190,7 @@ export class Subagent extends EventEmitter {
       case "entry_appended": {
         const entry = event.entry;
         if (entry?.customType === "subagent_children") this.children = entry.data.count;
+        if (entry?.type === "custom" && !entry.customType?.startsWith("subagent_")) this.messages.push({ role: "customEntry", entry });
         if (entry?.customType === "subagent_question") {
           this.waitingAnswer = true;
           this.emit("question", entry.data.question);

@@ -23,7 +23,7 @@ The main conversation has a blue **Subagents** block. It shows up to five recent
 - Use **Ctrl+Alt+G** or `/subagents` to select an agent with the keyboard.
 - Use `/subagents <name>` to open a particular agent directly.
 
-Opening an agent covers the terminal with its conversation, streaming response, thinking, tool arguments/results, usage, and message input. A native animated loader shows starting, working, thinking, tool execution, retries, compaction, or waiting for child agents—even between output events. It stops when waiting for your answer, idle, finished, or when you leave the view. The main session remains active underneath, with its history and editor untouched. Other agents continue running.
+Opening an agent covers the terminal with Pi's native user, assistant/thinking, tool execution/result, custom-message, and summary components, plus the native editor. Tool output uses Pi's compact previews, syntax highlighting, diffs, image settings, and expansion behavior—not JSON dumps or a separate transcript theme. A native animated loader shows starting, working, thinking, tool execution, retries, compaction, or waiting for child agents—even between output events. It stops when waiting for your answer, idle, finished, or when you leave the view. The main session remains active underneath, with its history and editor untouched. Other agents continue running.
 
 The same blue border contains **← Return to main agent**.
 
@@ -35,6 +35,9 @@ The same blue border contains **← Return to main agent**.
 | **Shift+Enter** | Insert a newline; multiline paste is also supported |
 | **PgUp / PgDn**, mouse wheel | Scroll conversation |
 | **Ctrl+Home / Ctrl+End** | Oldest output / follow live output |
+| Pi's tool-expansion key (normally **Ctrl+O**) | Expand/collapse native tool output |
+| Pi's thinking-toggle key (normally **Ctrl+T**) | Show/hide native thinking blocks |
+| Click thinking or tool results | Use the native component's collapse/expansion behavior |
 | **Ctrl+C**, **Ctrl+D**, or submit `/exit` | Stop this child and its descendants, and return to main |
 
 **When the selected child settles, fails, or exits, the view automatically returns to main.** Stopping one child also stops its descendants, but does not abort the main agent or any sibling. Returning manually retains an unsent child draft for the next visit. Completed conversations remain available to inspect.
@@ -51,7 +54,15 @@ Every conversation uses the same fullscreen view and **Return to main agent** al
 - Launch, provider, tool, extension, routing, and guarded viewer/dialog errors dismiss the subagent UI and post a **Subagent error** message in the main chat. Recoverable tool/retry errors do not cancel otherwise healthy agents. Pi appends the chat message at the next safe turn boundary if the main agent is currently streaming.
 - Finished descendants retain their saved sessions and loadouts. Resuming one from the root starts it as a directly owned background agent; it does not revive a dead ancestor.
 
-Mouse interaction is supported by Pi's fullscreen mode. Keyboard navigation also works in regular mode. Images are represented by placeholders; this is a structured conversation viewer, not an embedded child terminal or a clone of every native Pi screen.
+Mouse interaction is supported by Pi's fullscreen mode. Keyboard navigation also works in regular mode. Tool images follow Pi's native terminal-capability and image settings. The only extension-specific conversation decoration is the blue subagent information/return block.
+
+### Native rendering and layout extensions
+
+The view uses Pi's actual `UserMessageComponent`, `AssistantMessageComponent`, `ToolExecutionComponent`, summary/custom-message components, native dialogs, and `CustomEditor`. It reuses the main session's live tool-renderer resolution, Markdown transformers, custom-message/entry renderers, theme, and custom editor factory. A presentation extension loaded in the main Pi session therefore also affects subagent conversations; no extension factories are run again merely to obtain renderers.
+
+Task extensions still execute in the child with its saved profile/tool permissions. This does **not** turn restricted children into unrestricted sessions or enable automatic extension/MCP discovery. Renderer code loaded **only** in an isolated child cannot be transferred through JSON RPC; load its presentation extension in the main session too. Arbitrary child `ctx.ui.custom()` terminal screens and independent child headers/footers/widgets are not supported by Pi's RPC UI protocol and are not mirrored into this view.
+
+Pi 1.1 exports native components but not the active frontend registry through `ExtensionContext`. An isolated compatibility adapter observes context creation and frontend initialization/reload to access that live registry; this boundary needs regression testing when upgrading Pi.
 
 ### Commands
 

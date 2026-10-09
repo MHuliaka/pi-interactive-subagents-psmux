@@ -84,3 +84,21 @@ it("relays a three-level tree and routes user input through the real Pi RPC exte
     assert.ok(packets.some((p) => p.kind === "closed" && p.route.length === 3 && p.result.phase === "cancelled"), "shutdown must flush descendant exit states before Pi exits");
   } finally { await rpc.stop(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+it("uses the real Pi runner's live extension renderers for native subagent components", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-native-layout-"));
+  const extension = fileURLToPath(new URL("./fixtures/native-layout.ts", import.meta.url));
+  const rpc = new PiRpc(["--offline", "--no-extensions", "--no-mcp", "-e", extension], { cwd: dir, env: { ...process.env, PI_CODING_AGENT_DIR: join(dir, "agent") } });
+  const records: any[] = [];
+  rpc.on("record", (record) => records.push(record));
+  try {
+    await rpc.request("get_state");
+    await rpc.prompt("/native-layout-probe");
+    const entry = records.find((r) => r.type === "entry_appended" && r.entry.customType === "native-layout-probe")?.entry.data;
+    assert.ok(entry, JSON.stringify(records));
+    const text = entry.lines.join("\n");
+    for (const marker of ["USER LAYOUT", "ASSISTANT LAYOUT", "ASSISTANT-THINKING LAYOUT", "EXTENSION TOOL CALL", "EXTENSION TOOL RESULT", "EXTENSION CUSTOM MESSAGE", "EXTENSION CUSTOM ENTRY"]) assert.ok(text.includes(marker), marker);
+    assert.ok(!text.includes("secretRawDetail"));
+    for (const name of ["UserMessageComponent", "AssistantMessageComponent", "ToolExecutionComponent", "CustomMessageComponent"]) assert.ok(entry.components.includes(name), name);
+  } finally { await rpc.stop(); rmSync(dir, { recursive: true, force: true }); }
+});

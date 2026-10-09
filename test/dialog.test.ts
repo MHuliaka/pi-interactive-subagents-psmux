@@ -2,6 +2,10 @@ import { it } from "node:test";
 import assert from "node:assert/strict";
 import { ChildDialog } from "../pi-extension/subagents/dialog.ts";
 import { Subagent } from "../pi-extension/subagents/runtime.ts";
+import { initTheme } from "@earendil-works/pi-coding-agent";
+import { prepareNativeRenderers } from "../pi-extension/subagents/native-context.ts";
+initTheme("dark", false);
+await prepareNativeRenderers();
 
 const theme: any = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 function setup(record: any) {
