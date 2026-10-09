@@ -115,6 +115,18 @@ describe("in-tab view", () => {
     }
   });
 
+  it("anchors activity/status beside elapsed time on the right", () => {
+    const agents = [new Subagent("one", "worker", "task", "s", true), new Subagent("longer-name", "scout", "task", "s", true)];
+    agents[0].activity = "thinking"; agents[1].activity = "read";
+    for (const width of [80, 120]) {
+      const rows = formatAgentRows(agents, width);
+      const start = width - 1 - 2 - 3 - 8; // right margin, time, separator, activity width
+      assert.equal(visibleWidth(rows[0].slice(0, rows[0].indexOf("thinking"))), start);
+      assert.equal(visibleWidth(rows[1].slice(0, rows[1].indexOf("read"))), start);
+      assert.ok(rows[0].startsWith(" › one"));
+    }
+  });
+
   it("truncates long names with three dots without pushing other columns", () => {
     const agents = [new Subagent("an-extremely-long-agent-name-".repeat(4), "worker", "task", "s", true), new Subagent("short", "scout", "task", "s", true)];
     for (const agent of agents) { agent.phase = "running"; agent.activity = "thinking"; }

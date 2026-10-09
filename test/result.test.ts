@@ -11,7 +11,8 @@ it("shows a compact blue result by default, including when main tools start expa
   card.syncExpanded(true);
   const lines = card.render(80);
   assert.equal(lines.length, 3);
-  assert.ok(lines.join("\n").includes("38;2;77;163;255"));
+  assert.ok(lines.join("\n").includes("48;2;31;59;73"));
+  assert.ok(!lines.join("\n").includes("╭"));
   assert.ok(!lines.join("\n").includes("Detailed result"));
   card.syncExpanded(false);
   card.syncExpanded(true);
@@ -31,14 +32,16 @@ it("shows gray question cards collapsed by default and expands the full question
   assert.equal(card.render(80).length, 2);
 });
 
-it("shows terminal failures in a blue frame with an Error heading inside", () => {
+it("shows terminal failures as plain red Error text without a border or background", () => {
   const card = new SubagentResultCard('Subagent "scout" failed (12s).\n\nProvider unavailable', false, "error");
   const lines = card.render(80);
-  assert.ok(lines[1].includes("Error"));
+  assert.ok(lines[0].includes("Error:"));
   assert.ok(lines.join("\n").includes("Provider unavailable"));
-  assert.ok(lines.join("\n").includes("38;2;77;163;255"));
+  assert.ok(lines.join("\n").includes("\x1b[31m"));
+  assert.ok(!lines.join("\n").includes("╭"));
+  assert.ok(!lines.join("\n").includes("48;"));
   card.handleMouse(click);
-  assert.equal(card.render(80).length, 3);
+  assert.equal(card.render(80).length, 1);
 });
 
 it("clicks expand and collapse the entire result, not a truncated preview", () => {

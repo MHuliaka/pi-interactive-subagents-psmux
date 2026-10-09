@@ -17,7 +17,7 @@ If the package is already installed in Pi, update its checkout, install its depe
 
 ## Main tab and subagent views
 
-The main conversation has a blue **Subagents** block. It shows up to five recent active agents so a large delegation doesn't fill the terminal. Rows align names, profiles, states, activity, and elapsed time into columns using whitespace, without extra separators. Hierarchy arrows and indentation stay intact; long names end in `...` when space is limited. Finished agents leave the block, and the block disappears when no agents remain active. Saved/finished conversations are still accessible through `/subagents` for inspection or follow-up.
+The main conversation has a blue **Subagents** block. It shows up to five recent active agents so a large delegation doesn't fill the terminal. Rows align names, profiles, states, activity, and elapsed time into columns using whitespace, without extra separators. Activity/status and elapsed time form a right-aligned group. Hierarchy arrows and indentation stay intact; long names end in `...` when space is limited. Finished agents leave the block, and the block disappears when no agents remain active. Saved/finished conversations are still accessible through `/subagents` for inspection or follow-up.
 
 - Click a row in the block to open that agent in **fullscreen terminal mode**.
 - Use **Ctrl+Alt+G** or `/subagents` to select an agent with the keyboard.
@@ -52,13 +52,13 @@ Every conversation uses the same fullscreen view and **Return to main agent** al
 - Stopping an ancestor closes descendant views immediately and cancels that branch. Siblings continue.
 - An ancestor crashing closes descendant views and cleans up known orphan processes. Children also abort/shut down if their parent IPC connection disappears.
 - Recoverable tool failures, provider retry attempts, compaction errors, and child extension diagnostics stay inside the child. They neither dismiss its view nor create main-chat/context messages. Successful recovery produces only the final result.
-- A terminal child failure returns to main and reports once in a blue frame with an **Error** heading; it does not also send a duplicate result. Terminal failures remain available to the delegating agent. Legacy `subagent_error` messages without terminal-failure metadata are excluded from future orchestrator context, without deleting saved history.
-- Viewer/dialog/control failures restore the main UI and show a blue error notification through non-context custom session entries, not `sendMessage()`.
+- A terminal child failure returns to main and reports once as plain red **Error:** text; it does not also send a duplicate result. Terminal failures remain available to the delegating agent. Legacy `subagent_error` messages without terminal-failure metadata are excluded from future orchestrator context, without deleting saved history.
+- Viewer/dialog/control failures restore the main UI and show a plain red error notification through non-context custom session entries, not `sendMessage()`.
 - Finished descendants retain their saved sessions and loadouts. Resuming one from the root starts it as a directly owned background agent; it does not revive a dead ancestor.
 
 Mouse interaction is supported by Pi's fullscreen mode. Keyboard navigation also works in regular mode. Tool images follow Pi's native terminal-capability and image settings. The only extension-specific conversation decoration is the blue subagent information/return block.
 
-Main-chat subagent results appear as compact blue cards, collapsed by default. Subagent questions use gray-background cards, also collapsed by default; their full text still reaches the delegating agent. Click a card to expand/collapse it, or use Pi's tool-expansion shortcut (normally **Ctrl+O**). Terminal failures use blue frames with an **Error** heading and visible failure details.
+Main-chat subagent results appear as compact, borderless blue-background cards using the same background as Pi's user messages, collapsed by default. Subagent questions use gray-background cards, also collapsed by default; their full text still reaches the delegating agent. Click a card to expand/collapse it, or use Pi's tool-expansion shortcut (normally **Ctrl+O**). Terminal failures use plain red **Error:** text with visible failure details, without a background or border.
 
 The active-subagent widget has no bottom shortcut/count hint. It is registered once while agents are active, rather than replaced on every stream update. It stays first in the above-editor widget area without an extra blank row below the blue frame, keeping observation-memory progress underneath instead of swapping positions during updates.
 
@@ -219,7 +219,7 @@ Automated tests are not a substitute for a manual live-provider and interactive-
 - **Native Pi presentation:** user/assistant messages, thinking, tools, diffs, images, editors, and dialogs use Pi's built-in components and shared presentation extensions.
 - **Blue agent navigation:** an active-only widget opens full-window child conversations; Return always goes to the root main session without stopping the child.
 - **Full nested-agent tree:** descendants are visible and addressable by path, with routed messages/dialogs, branch cancellation, and ancestor-crash cleanup.
-- **Cleaner notifications:** collapsed blue result cards, collapsed gray question cards, and blue terminal-failure frames. Recoverable child errors stay in the child.
+- **Cleaner notifications:** collapsed borderless blue-background results, collapsed gray questions, and plain red terminal failures. Recoverable child errors stay in the child.
 - **Model-context isolation:** UI state and duplicate descendant notifications stay out of main context; legacy diagnostics are filtered before requests and summaries.
 - **Stable progress layout:** animated working indicators and a stable agent widget leave room for observation progress below it.
 - **Lifecycle regression coverage:** deterministic subprocess tests and real Pi-runtime checks cover the new backend and rendering/context boundaries.
