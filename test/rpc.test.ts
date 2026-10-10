@@ -126,6 +126,14 @@ describe("RPC transport", () => {
 });
 
 describe("subagent lifecycle", () => {
+  it("preserves the token count required by native live compaction rendering", () => {
+    const agent = new Subagent("worker", "worker", "task", "session", false);
+    agent.receive({ type: "compaction_end", result: { summary: "Keep working", tokensBefore: 12345 } });
+    assert.equal(agent.messages[0].role, "compactionSummary");
+    assert.equal(agent.messages[0].tokensBefore, 12345);
+    assert.equal(agent.messages[0].summary, "Keep working");
+    assert.equal(typeof agent.messages[0].timestamp, "number");
+  });
   it("runs legacy initial messages in order without reporting a premature result", async () => {
     const h = harness();
     const agent = new Subagent("worker", "worker", "task", "session", true, h.rpc);

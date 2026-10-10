@@ -100,6 +100,9 @@ async function command(request) {
       send({ type: "tool_execution_end", toolCallId: "bad", result: { content: [{ type: "text", text: "fixture missing file" }] }, isError: true });
       return;
     }
+    if (request.message.includes("COMPACT")) {
+      send({ type: "compaction_end", result: { summary: "Compacted long-running work", ...(request.message.includes("LEGACY_COMPACT") ? {} : { tokensBefore: 12345 }) } });
+    }
     if (request.message.includes("HOLD")) {
       if (!heartbeat) heartbeat = setInterval(() => writeFileSync(session + ".heartbeat", String(Date.now())), 50);
       return;

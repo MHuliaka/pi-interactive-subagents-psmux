@@ -90,7 +90,15 @@ export class NativeTranscript implements Component {
           component = new CustomMessageComponent(message, this.guarded(this.presentation.message(message.customType)), settings.markdownTheme, settings.outputPad);
           (component as CustomMessageComponent).setExpanded(this.expanded);
         } else if (message.role === "customEntry") component = this.presentation.entry(message.entry, settings.outputPad, (error) => this.agent.emit("fault", `Native renderer: ${String(error)}`));
-        else if (message.role === "compactionSummary") component = new CompactionSummaryMessageComponent(message, settings.markdownTheme, settings.outputPad);
+        else if (message.role === "compactionSummary") {
+          if (typeof message.tokensBefore === "number" && Number.isFinite(message.tokensBefore) && message.tokensBefore >= 0) {
+            component = new CompactionSummaryMessageComponent(message, settings.markdownTheme, settings.outputPad);
+          } else {
+            // Legacy live messages dropped tokensBefore. Do not invent a token
+            // count or let a malformed presentation entry close the child view.
+            component = new CustomMessageComponent({ role: "custom", customType: "compaction", content: `Token count unavailable.\n\n${message.summary ?? ""}`, display: true, timestamp: message.timestamp ?? 0 }, undefined, settings.markdownTheme, settings.outputPad);
+          }
+        }
         else if (message.role === "branchSummary") component = new BranchSummaryMessageComponent(message, settings.markdownTheme, settings.outputPad);
         else if (message.role === "bashExecution") {
           const bash = new BashExecutionComponent(message.command, this.tui, message.excludeFromContext, settings.outputPad);

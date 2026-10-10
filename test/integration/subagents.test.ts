@@ -210,6 +210,26 @@ async function waitSessions(h: Awaited<ReturnType<typeof setup>>, predicate: (se
   }
 }
 
+it("opens long-running child views after valid and legacy compaction without stopping them", async () => {
+  const h = await setup();
+  try {
+    for (const task of ["COMPACT HOLD", "LEGACY_COMPACT HOLD"]) {
+      const name = task.startsWith("LEGACY") ? "legacy-compaction" : "live-compaction";
+      await h.execute("subagent", { agent: "scout", name, task });
+      await waitFor(() => existsSync(h.launches.at(-1).args[h.launches.at(-1).args.indexOf("--session") + 1] + ".heartbeat"));
+      const opened = view(h, name);
+      assert.doesNotThrow(() => opened.state.component.render(100));
+      assert.equal(opened.state.returned, 0);
+      assert.equal(opened.state.component.agent.live, true);
+      assert.equal(h.entries.length, 0);
+      assert.equal(h.results.length, 0);
+      opened.state.consume("\x1b");
+      await opened.done;
+      assert.equal(opened.state.component.agent.live, true, "returning must leave the long-running child alive");
+    }
+  } finally { await h.shutdown(); }
+});
+
 it("opens a grandchild in the root tab, routes messages to it, and delivers completion to its owner", async () => {
   const h = await setup();
   try {

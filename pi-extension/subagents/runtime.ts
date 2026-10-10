@@ -187,7 +187,7 @@ export class Subagent extends EventEmitter {
       case "auto_retry_end": this.error = event.success ? undefined : event.finalError ?? this.error ?? "Subagent exhausted all retries without a response."; break;
       case "compaction_start": this.activity = "compacting"; break;
       case "compaction_end":
-        if (event.result) this.messages.push({ role: "compactionSummary", summary: event.result.summary, usage: event.result.usage });
+        if (event.result) this.messages.push({ role: "compactionSummary", summary: event.result.summary, tokensBefore: event.result.tokensBefore, timestamp: Date.now() });
         else if (event.errorMessage) this.messages.push({ role: "custom", customType: "Compaction error", content: event.errorMessage, display: true });
         break;
       case "thinking_level_changed": this.thinking = event.level; break;
